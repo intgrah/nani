@@ -45,9 +45,9 @@ pub struct Parser<'a, R: BufRead> {
     dag: Dag<'a>,
     anon: NamePtr<'a>,
     zero: LevelPtr<'a>,
-    names_by_idx: Vec<NamePtr<'a>>,
-    levels_by_idx: Vec<LevelPtr<'a>>,
-    exprs_by_idx: Vec<ExprPtr<'a>>,
+    names_by_idx: Vec<Option<NamePtr<'a>>>,
+    levels_by_idx: Vec<Option<LevelPtr<'a>>>,
+    exprs_by_idx: Vec<Option<ExprPtr<'a>>>,
     declars: FxIndexMap<NamePtr<'a>, Declar<'a>>,
     notations: FxHashMap<NamePtr<'a>, Notation<'a>>,
     config: Config,
@@ -87,6 +87,14 @@ enum BackRef {
     Il(u32),
     #[serde(alias = "ie")]
     Ie(u32),
+}
+
+impl BackRef {
+    fn index(self) -> u32 {
+        match self {
+            BackRef::In(i) | BackRef::Il(i) | BackRef::Ie(i) => i,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -400,8 +408,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
             dag,
             anon,
             zero,
-            names_by_idx: vec![anon],
-            levels_by_idx: vec![zero],
+            names_by_idx: vec![Some(anon)],
+            levels_by_idx: vec![Some(zero)],
             exprs_by_idx: Vec::new(),
             declars: new_fx_index_map(),
             notations: new_fx_hash_map(),
@@ -416,16 +424,11 @@ impl<'a, R: BufRead> Parser<'a, R> {
             panic!("Attempted to insert duplicate Name");
         }
         let ptr = NamePtr::global(self.dag.names.insert(self.arena, n));
-        let idx = u32::try_from(self.names_by_idx.len()).unwrap();
-        self.names_by_idx.push(ptr);
-        if expected != BackRef::In(idx) {
-            eprintln!(
-                "Declined: Name back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.",
-                BackRef::In(idx),
-                expected
-            );
-            std::process::exit(2);
+        let i = expected.index() as usize;
+        if i >= self.names_by_idx.len() {
+            self.names_by_idx.resize(i + 1, None);
         }
+        self.names_by_idx[i] = Some(ptr);
     }
 
     fn push_level(&mut self, expected: BackRef, l: Level<'a>) {
@@ -433,16 +436,11 @@ impl<'a, R: BufRead> Parser<'a, R> {
             panic!("Attempted to insert duplicate Level");
         }
         let ptr = LevelPtr::global(self.dag.levels.insert(self.arena, l));
-        let idx = u32::try_from(self.levels_by_idx.len()).unwrap();
-        self.levels_by_idx.push(ptr);
-        if expected != BackRef::Il(idx) {
-            eprintln!(
-                "Declined: Level back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.",
-                BackRef::Il(idx),
-                expected
-            );
-            std::process::exit(2);
+        let i = expected.index() as usize;
+        if i >= self.levels_by_idx.len() {
+            self.levels_by_idx.resize(i + 1, None);
         }
+        self.levels_by_idx[i] = Some(ptr);
     }
 
     fn push_expr(&mut self, expected: BackRef, e: Expr<'a>) {
@@ -450,16 +448,11 @@ impl<'a, R: BufRead> Parser<'a, R> {
             panic!("Attempted to insert duplicate Expr");
         }
         let ptr = ExprPtr::global(self.dag.exprs.insert(self.arena, e));
-        let idx = u32::try_from(self.exprs_by_idx.len()).unwrap();
-        self.exprs_by_idx.push(ptr);
-        if expected != BackRef::Ie(idx) {
-            eprintln!(
-                "Declined: Expr back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.",
-                BackRef::Ie(idx),
-                expected
-            );
-            std::process::exit(2);
+        let i = expected.index() as usize;
+        if i >= self.exprs_by_idx.len() {
+            self.exprs_by_idx.resize(i + 1, None);
         }
+        self.exprs_by_idx[i] = Some(ptr);
     }
 
     fn axiom_permitted(&self, n: NamePtr<'a>) -> bool {
@@ -471,12 +464,18 @@ impl<'a, R: BufRead> Parser<'a, R> {
 
     fn has_fvars(&self, e: ExprPtr<'a>) -> bool { e.as_ref().has_fvars() }
 
-    fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> { self.names_by_idx[idx as usize] }
+    fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> {
+        self.names_by_idx.get(idx as usize).copied().flatten()
+            .unwrap_or_else(|| panic!("export references name index {idx} before it is defined"))
+    }
 
-    fn get_level_ptr(&self, idx: u32) -> LevelPtr<'a> { self.levels_by_idx[idx as usize] }
+    fn get_level_ptr(&self, idx: u32) -> LevelPtr<'a> {
+        self.levels_by_idx.get(idx as usize).copied().flatten()
+            .unwrap_or_else(|| panic!("export references level index {idx} before it is defined"))
+    }
 
     fn get_names(&self, idxs: &[u32]) -> Vec<NamePtr<'a>> {
-        idxs.iter().map(|&idx| self.names_by_idx[idx as usize]).collect()
+        idxs.iter().map(|&idx| self.get_name_ptr(idx)).collect()
     }
 
     fn get_uparams_ptr(&mut self, name_idxs: &[u32]) -> LevelsPtr<'a> {
@@ -491,11 +490,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     fn get_levels_ptr(&mut self, idxs: &[u32]) -> LevelsPtr<'a> {
-        let levels = idxs.iter().map(|&idx| self.levels_by_idx[idx as usize]).collect::<Vec<_>>();
+        let levels = idxs.iter().map(|&idx| self.get_level_ptr(idx)).collect::<Vec<_>>();
         LevelsPtr::global(self.dag.uparams.intern(self.arena, &levels))
     }
 
-    fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> { self.exprs_by_idx[idx as usize] }
+    fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
+        self.exprs_by_idx.get(idx as usize).copied().flatten()
+            .unwrap_or_else(|| panic!("export references expression index {idx} before it is defined"))
+    }
 
     fn name_to_string(&self, n: NamePtr<'a>) -> String {
         match *n.as_ref() {
