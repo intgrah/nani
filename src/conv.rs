@@ -23,16 +23,15 @@ fn is_cacheable<'a>(v: &Value<'a>) -> bool {
 
 impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     pub(crate) fn def_eq_core(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        let depth = u32::from(self.ctx.dbj_level_counter);
         let env = self.empty_env();
-        let vx = self.eval(env, x);
-        let vy = self.eval(env, y);
-        if self.try_top_proof_irrel(vx, vy) {
+        let vx = self.eval(depth, env, x);
+        let vy = self.eval(depth, env, y);
+        if self.try_proof_irrel_at(depth, vx, vy) {
             return true;
         }
-        self.conv_types(vx, vy)
+        self.conv_types_at(depth, vx, vy)
     }
-
-    pub(crate) fn conv_types(&mut self, a: V<'t>, b: V<'t>) -> bool { self.unify::<true>(0, a, b) }
 
     pub(crate) fn conv_types_at(&mut self, depth: u32, a: V<'t>, b: V<'t>) -> bool { self.unify::<true>(depth, a, b) }
 
@@ -64,8 +63,8 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     #[inline]
     fn unify<const RIGID: bool>(&mut self, depth: u32, mut x: V<'t>, mut y: V<'t>) -> bool {
         loop {
-            x = self.force_thunk(x);
-            y = self.force_thunk(y);
+            x = self.force_thunk(depth, x);
+            y = self.force_thunk(depth, y);
             if std::ptr::eq(x, y) {
                 return true;
             }
@@ -124,7 +123,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn unify_no_cache<const RIGID: bool>(&mut self, depth: u32, x: V<'t>, y: V<'t>) -> bool {
-        let (t, t2) = (self.force_thunk(x), self.force_thunk(y));
+        let (t, t2) = (self.force_thunk(depth, x), self.force_thunk(depth, y));
         if let Some(r) = self.conv_nat::<RIGID>(depth, t, t2) {
             return r;
         }
@@ -182,8 +181,8 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 }
                 let dx = *dx;
                 let fresh = self.mk_bvar_hc(depth, dx);
-                let vx = self.apply_closure_v(bx, fresh);
-                let vy = self.apply_closure_v(by, fresh);
+                let vx = self.apply_closure_v(depth + 1, bx, fresh);
+                let vy = self.apply_closure_v(depth + 1, by, fresh);
                 self.unify::<RIGID>(depth + 1, vx, vy)
             }
 
@@ -191,10 +190,10 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 if bx.body == by.body && Self::envs_ptr_equal(bx.env, by.env) {
                     return true;
                 }
-                let dx = self.lam_domain(t);
+                let dx = self.lam_domain(depth, t);
                 let fresh = self.mk_bvar_hc(depth, dx);
-                let vx = self.apply_closure_v(bx, fresh);
-                let vy = self.apply_closure_v(by, fresh);
+                let vx = self.apply_closure_v(depth + 1, bx, fresh);
+                let vy = self.apply_closure_v(depth + 1, by, fresh);
                 self.unify::<RIGID>(depth + 1, vx, vy)
             }
 
@@ -219,29 +218,29 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                     let lh = self.unfold_hint(nx);
                     let rh = self.unfold_hint(ny);
                     if lh.is_lt(&rh) {
-                        let v2 = self.unfold_value(t2);
+                        let v2 = self.unfold_value(depth, t2);
                         if !std::ptr::eq(v2, t2) {
                             return self.unify::<true>(depth, t, v2);
                         }
-                        let v1 = self.unfold_value(t);
+                        let v1 = self.unfold_value(depth, t);
                         if !std::ptr::eq(v1, t) {
                             return self.unify::<true>(depth, v1, t2);
                         }
-                        let f2 = self.unfold_value_demand(t2);
+                        let f2 = self.unfold_value_demand(depth, t2);
                         if std::ptr::eq(f2, t2) {
                             return false;
                         }
                         self.unify::<true>(depth, t, f2)
                     } else if rh.is_lt(&lh) {
-                        let v1 = self.unfold_value(t);
+                        let v1 = self.unfold_value(depth, t);
                         if !std::ptr::eq(v1, t) {
                             return self.unify::<true>(depth, v1, t2);
                         }
-                        let v2 = self.unfold_value(t2);
+                        let v2 = self.unfold_value(depth, t2);
                         if !std::ptr::eq(v2, t2) {
                             return self.unify::<true>(depth, t, v2);
                         }
-                        let f1 = self.unfold_value_demand(t);
+                        let f1 = self.unfold_value_demand(depth, t);
                         if std::ptr::eq(f1, t) {
                             return false;
                         }
@@ -260,9 +259,9 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 if self.try_proof_irrel_at(depth, t, t2) {
                     return true;
                 }
-                let v1 = self.unfold_value(t);
+                let v1 = self.unfold_value(depth, t);
                 if std::ptr::eq(v1, t) {
-                    let f1 = self.unfold_value_demand(t);
+                    let f1 = self.unfold_value_demand(depth, t);
                     if std::ptr::eq(f1, t) {
                         return false;
                     }
@@ -274,9 +273,9 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 if self.try_proof_irrel_at(depth, t, t2) {
                     return true;
                 }
-                let v2 = self.unfold_value(t2);
+                let v2 = self.unfold_value(depth, t2);
                 if std::ptr::eq(v2, t2) {
-                    let f2 = self.unfold_value_demand(t2);
+                    let f2 = self.unfold_value_demand(depth, t2);
                     if std::ptr::eq(f2, t2) {
                         return false;
                     }
@@ -289,16 +288,16 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 if self.try_proof_irrel_at(depth, t, t2) {
                     return true;
                 }
-                if let Some(v1) = self.iota_value(t) {
+                if let Some(v1) = self.iota_value(depth, t) {
                     return self.unify::<true>(depth, v1, t2);
                 }
                 if matches!(t2, Value::Rigid { head: RigidHead::Recursor(..) | RigidHead::QuotConst(..), .. }) {
-                    if let Some(v2) = self.iota_value(t2) {
+                    if let Some(v2) = self.iota_value(depth, t2) {
                         return self.unify::<true>(depth, t, v2);
                     }
                 }
                 if matches!(t2, Value::Unfold { .. }) {
-                    let v2 = self.unfold_value_demand(t2);
+                    let v2 = self.unfold_value_demand(depth, t2);
                     if !std::ptr::eq(v2, t2) {
                         return self.unify::<true>(depth, t, v2);
                     }
@@ -309,11 +308,11 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 if self.try_proof_irrel_at(depth, t, t2) {
                     return true;
                 }
-                if let Some(v2) = self.iota_value(t2) {
+                if let Some(v2) = self.iota_value(depth, t2) {
                     return self.unify::<true>(depth, t, v2);
                 }
                 if matches!(t, Value::Unfold { .. }) {
-                    let v1 = self.unfold_value_demand(t);
+                    let v1 = self.unfold_value_demand(depth, t);
                     if !std::ptr::eq(v1, t) {
                         return self.unify::<true>(depth, v1, t2);
                     }
@@ -333,11 +332,11 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn unfold_pair(&mut self, depth: u32, t: V<'t>, t2: V<'t>) -> bool {
-        let v1 = self.unfold_value(t);
-        let v2 = self.unfold_value(t2);
+        let v1 = self.unfold_value(depth, t);
+        let v2 = self.unfold_value(depth, t2);
         if std::ptr::eq(v1, t) && std::ptr::eq(v2, t2) {
-            let f1 = self.unfold_value_demand(t);
-            let f2 = self.unfold_value_demand(t2);
+            let f1 = self.unfold_value_demand(depth, t);
+            let f2 = self.unfold_value_demand(depth, t2);
             if std::ptr::eq(f1, t) && std::ptr::eq(f2, t2) {
                 return false;
             }
@@ -362,8 +361,8 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             if self.try_proof_irrel_at(depth, t, t2) {
                 return true;
             }
-            let v1 = self.iota_or_self(t);
-            let v2 = self.iota_or_self(t2);
+            let v1 = self.iota_or_self(depth, t);
+            let v2 = self.iota_or_self(depth, t2);
             let progressed = !std::ptr::eq(v1, t) || !std::ptr::eq(v2, t2);
             if progressed {
                 return self.unify::<true>(depth, v1, v2);
@@ -379,7 +378,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn iota_or_self(&mut self, v: V<'t>) -> V<'t> { self.iota_value(v).unwrap_or(v) }
+    fn iota_or_self(&mut self, depth: u32, v: V<'t>) -> V<'t> { self.iota_value(depth, v).unwrap_or(v) }
 
     fn unfold_hint(&self, name: NamePtr<'t>) -> ReducibilityHint {
         match self.env.get_declar(&name) {
@@ -414,17 +413,17 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
         match (x, y) {
             (Value::Lam { body, .. }, _) if !matches!(y, Value::Lam { .. }) => {
-                let domain = self.lam_domain(x);
+                let domain = self.lam_domain(depth, x);
                 let fresh = self.mk_bvar_hc(depth, domain);
-                let lhs = self.apply_closure_v(body, fresh);
-                let rhs = self.apply_v(y, fresh);
+                let lhs = self.apply_closure_v(depth + 1, body, fresh);
+                let rhs = self.apply_v(depth + 1, y, fresh);
                 return self.unify::<true>(depth + 1, lhs, rhs);
             }
             (_, Value::Lam { body, .. }) if !matches!(x, Value::Lam { .. }) => {
-                let domain = self.lam_domain(y);
+                let domain = self.lam_domain(depth, y);
                 let fresh = self.mk_bvar_hc(depth, domain);
-                let lhs = self.apply_v(x, fresh);
-                let rhs = self.apply_closure_v(body, fresh);
+                let lhs = self.apply_v(depth + 1, x, fresh);
+                let rhs = self.apply_closure_v(depth + 1, body, fresh);
                 return self.unify::<true>(depth + 1, lhs, rhs);
             }
             _ => {}
@@ -433,10 +432,10 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn try_struct_eta(&mut self, depth: u32, x: V<'t>, y: V<'t>) -> bool {
-        let xt = self.value_type_opt(x);
-        let yt = self.value_type_opt(y);
+        let xt = self.value_type_opt(depth, x);
+        let yt = self.value_type_opt(depth, y);
         for ty in [xt, yt].into_iter().flatten() {
-            let ty_f = self.force_all(ty);
+            let ty_f = self.force_all(depth, ty);
             if let Value::Rigid { head: RigidHead::Inductive(ind_name, _), .. } = ty_f {
                 let ind_name = *ind_name;
                 if self.is_unit_inductive(ind_name) {
@@ -452,14 +451,12 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         false
     }
 
-    fn value_type_opt(&mut self, v: V<'t>) -> Option<V<'t>> {
+    fn value_type_opt(&mut self, depth: u32, v: V<'t>) -> Option<V<'t>> {
         match v {
             Value::Pi { .. } | Value::Lam { .. } => None,
-            _ => Some(self.value_type(v)),
+            _ => Some(self.value_type(depth, v)),
         }
     }
-
-    pub(crate) fn try_top_proof_irrel(&mut self, x: V<'t>, y: V<'t>) -> bool { self.try_proof_irrel_at(0, x, y) }
 
     fn try_proof_irrel_at(&mut self, depth: u32, x: V<'t>, y: V<'t>) -> bool {
         if matches!(x, Value::Lam { .. }) || matches!(y, Value::Lam { .. }) {
@@ -471,19 +468,19 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         if !matches!(y, Value::Rigid { .. } | Value::Unfold { .. }) {
             return false;
         }
-        let tx = self.value_type(x);
-        if !self.is_prop_type(tx) {
+        let tx = self.value_type(depth, x);
+        if !self.is_prop_type(depth, tx) {
             return false;
         }
-        let ty = self.value_type(y);
-        if !self.is_prop_type(ty) {
+        let ty = self.value_type(depth, y);
+        if !self.is_prop_type(depth, ty) {
             return false;
         }
         self.conv_types_at(depth, tx, ty)
     }
 
-    fn is_prop_type(&mut self, t: V<'t>) -> bool {
-        if let Some(l) = self.level_of_type(t) {
+    fn is_prop_type(&mut self, depth: u32, t: V<'t>) -> bool {
+        if let Some(l) = self.level_of_type(depth, t) {
             self.ctx.is_zero(l)
         } else {
             false
@@ -496,10 +493,10 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             (_, Value::Lam { .. }) => y,
             _ => return false,
         };
-        let domain = self.lam_domain(lam_side);
+        let domain = self.lam_domain(depth, lam_side);
         let fresh = self.mk_bvar_hc(depth, domain);
-        let xb = self.apply_v(x, fresh);
-        let yb = self.apply_v(y, fresh);
+        let xb = self.apply_v(depth + 1, x, fresh);
+        let yb = self.apply_v(depth + 1, y, fresh);
         self.try_proof_irrel_at(depth + 1, xb, yb)
     }
 
@@ -516,12 +513,12 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         if inductive_name != ind_name {
             return false;
         }
-        let yargs: Vec<V<'t>> = match self.spine_apps(yspine) {
+        let yargs: Vec<V<'t>> = match self.spine_apps(depth, yspine) {
             Some(v) if v.len() == usize::from(num_params) + usize::from(num_fields) => v,
             _ => return false,
         };
         for i in 0..usize::from(num_fields) {
-            let proj = self.do_proj(ind_name, i, x);
+            let proj = self.do_proj(depth, ind_name, i, x);
             let rhs = yargs[usize::from(num_params) + i];
             if !self.unify::<true>(depth, proj, rhs) {
                 return false;
@@ -611,19 +608,19 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn level_of_type(&mut self, ty: V<'t>) -> Option<LevelPtr<'t>> {
-        let ty = self.force_thunk(ty);
+    fn level_of_type(&mut self, depth: u32, ty: V<'t>) -> Option<LevelPtr<'t>> {
+        let ty = self.force_thunk(depth, ty);
         match ty {
             Value::Sort { level } => {
                 let s = self.ctx.succ(*level);
                 Some(self.ctx.simplify(s))
             }
             Value::Pi { domain, body, .. } => {
-                let l_dom = self.level_of_type(domain)?;
-                let fresh = self.mk_bvar_hc(0, domain);
-                let cod = self.apply_closure_v(body, fresh);
-                let cod_f = self.force_all(cod);
-                let l_cod = self.level_of_type(cod_f)?;
+                let l_dom = self.level_of_type(depth, domain)?;
+                let fresh = self.mk_bvar_hc(depth, domain);
+                let cod = self.apply_closure_v(depth + 1, body, fresh);
+                let cod_f = self.force_all(depth + 1, cod);
+                let l_cod = self.level_of_type(depth + 1, cod_f)?;
                 let l = self.ctx.imax(l_dom, l_cod);
                 Some(self.ctx.simplify(l))
             }
@@ -640,24 +637,24 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 if let Some(l) = self.const_result_level(n, ls) {
                     return Some(l);
                 }
-                let t = self.value_type(ty);
-                let t_f = self.force_all(t);
+                let t = self.value_type(depth, ty);
+                let t_f = self.force_all(depth, t);
                 match t_f {
                     Value::Sort { level } => Some(self.ctx.simplify(*level)),
                     _ => None,
                 }
             }
             Value::Unfold { head: UnfoldHead { name, levels }, .. } => {
-                let t = self.value_type(ty);
-                let t_f = self.force_all(t);
+                let t = self.value_type(depth, ty);
+                let t_f = self.force_all(depth, t);
                 if let Value::Sort { level } = t_f {
                     return Some(self.ctx.simplify(*level));
                 }
                 self.const_result_level(*name, *levels)
             }
             Value::Rigid { head: RigidHead::BVar(..) | RigidHead::Local(..), .. } => {
-                let t = self.value_type(ty);
-                let ty_f = self.force_all(t);
+                let t = self.value_type(depth, ty);
+                let ty_f = self.force_all(depth, t);
                 match ty_f {
                     Value::Sort { level } => Some(self.ctx.simplify(*level)),
                     _ => None,

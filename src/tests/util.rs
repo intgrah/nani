@@ -121,6 +121,19 @@ fn check_sparse_name_index() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[should_panic(expected = "def_eq failed")]
+fn check_k_reduce_depth_alias() {
+    test_export_file_should_panic(
+        Some(Path::new("test_resources/KReduceDepthAlias/config.json")),
+        |export| {
+            for declar in export.declars.values() {
+                export.check_declar(declar);
+            }
+        },
+    )
+}
+
+#[test]
 #[should_panic(expected = "infer_proj prop")]
 fn check_proj_from_prop() {
     test_export_file_should_panic(
