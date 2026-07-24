@@ -153,7 +153,7 @@ const EXPR_FVAR_BIT: u64 = 2;
 const EXPR_BVAR_SHIFT: u32 = 48;
 
 pub struct ExprPtr<'a> {
-    bits: u64,
+    bits: std::num::NonZeroU64,
     _ph: PhantomData<&'a Expr<'a>>,
 }
 
@@ -172,7 +172,7 @@ impl<'a> ExprPtr<'a> {
         debug_assert!(addr & !EXPR_ADDR_MASK == 0);
         let derived = (u64::from(r.num_loose_bvars()) << EXPR_BVAR_SHIFT)
             | if r.has_fvars() { EXPR_FVAR_BIT } else { 0 };
-        Self { bits: addr | tag | derived, _ph: PhantomData }
+        Self { bits: unsafe { std::num::NonZeroU64::new_unchecked(addr | tag | derived) }, _ph: PhantomData }
     }
 
     #[inline]
@@ -182,21 +182,21 @@ impl<'a> ExprPtr<'a> {
     pub(crate) fn local(r: &'a Expr<'a>) -> Self { Self::pack(r, EXPR_LOCAL_BIT) }
 
     #[inline]
-    pub(crate) fn is_local(self) -> bool { self.bits & EXPR_LOCAL_BIT != 0 }
+    pub(crate) fn is_local(self) -> bool { self.bits.get() & EXPR_LOCAL_BIT != 0 }
 
     #[inline]
-    pub(crate) fn num_loose_bvars(self) -> u16 { (self.bits >> EXPR_BVAR_SHIFT) as u16 }
+    pub(crate) fn num_loose_bvars(self) -> u16 { (self.bits.get() >> EXPR_BVAR_SHIFT) as u16 }
 
     #[inline]
-    pub(crate) fn has_fvars(self) -> bool { self.bits & EXPR_FVAR_BIT != 0 }
+    pub(crate) fn has_fvars(self) -> bool { self.bits.get() & EXPR_FVAR_BIT != 0 }
 
     #[inline]
     pub(crate) fn as_ref(self) -> &'a Expr<'a> {
-        unsafe { &*((self.bits & EXPR_ADDR_MASK) as usize as *const Expr<'a>) }
+        unsafe { &*((self.bits.get() & EXPR_ADDR_MASK) as usize as *const Expr<'a>) }
     }
 
     #[inline]
-    pub(crate) fn get_hash(&self) -> u64 { self.bits }
+    pub(crate) fn get_hash(&self) -> u64 { self.bits.get() }
 }
 
 impl<'a> std::ops::Deref for ExprPtr<'a> {
@@ -213,7 +213,7 @@ impl<'a> Eq for ExprPtr<'a> {}
 
 impl<'a> std::hash::Hash for ExprPtr<'a> {
     #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.bits) }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.bits.get()) }
 }
 
 impl<'a> std::fmt::Debug for ExprPtr<'a> {
@@ -223,6 +223,7 @@ impl<'a> std::fmt::Debug for ExprPtr<'a> {
 }
 
 const _: () = assert!(std::mem::align_of::<Expr<'static>>() >= 8);
+const _: () = assert!(std::mem::size_of::<Option<ExprPtr<'static>>>() == 8);
 #[cfg(not(feature = "top-byte-ignore"))]
 const _: () = assert!(std::mem::align_of::<Name<'static>>() >= 2);
 #[cfg(not(feature = "top-byte-ignore"))]
