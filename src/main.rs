@@ -3,6 +3,9 @@ use std::error::Error;
 use std::path::Path;
 use stumpalo::Arena;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> Result<(), MainError> {
     let mut args = std::env::args();
     let _ = args.next();

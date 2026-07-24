@@ -52,7 +52,9 @@ pub struct Parser<'a, R: BufRead> {
     notations: FxHashMap<NamePtr<'a>, Notation<'a>>,
     config: Config,
     skipped: Vec<String>,
-    mutual_block_sizes: FxHashMap<NamePtr<'a>, (usize, usize)>
+    mutual_block_sizes: FxHashMap<NamePtr<'a>, (usize, usize)>,
+    scratch_idxs: Vec<u32>,
+    pending_exprs: Vec<(u64, &'a Expr<'a>)>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
@@ -353,16 +355,18 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
     config: Config,
 ) -> Result<(crate::util::ExportFile<'p>, Vec<String>), Box<dyn Error>> {
     let mut parser = Parser::new(arena, buf_reader, config);
-    let mut line_buffer = String::new();
+    let mut input = Vec::new();
+    parser.buf_reader.read_to_end(&mut input)?;
 
-    loop {
-        let amt = parser.buf_reader.read_line(&mut line_buffer)?;
-        if amt == 0 {
-            break
-        }
-        parser.go1(line_buffer.as_str())?;
+    let mut pos = 0;
+    while pos < input.len() {
+        let end = match find_newline(&input[pos..]) {
+            Some(i) => pos + i + 1,
+            None => input.len(),
+        };
+        parser.go1(&input[pos..end])?;
         parser.line_num += 1;
-        line_buffer.clear();
+        pos = end;
     }
     
     // If the execution config has `unknown_pp_declar_hard_error: true`, and a `pp_declars` 
@@ -382,6 +386,9 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
         }
     }
     
+    let mut pending_exprs = std::mem::take(&mut parser.pending_exprs);
+    parser.dag.exprs.build_unique(&mut pending_exprs);
+
     let name_cache = parser.dag.mk_name_cache(parser.anon);
     let export_file = crate::util::ExportFile {
         dag: parser.dag,
@@ -394,6 +401,439 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
         mutual_block_sizes: parser.mutual_block_sizes
     };
     Ok((export_file, parser.skipped))
+}
+
+struct Fallback;
+
+#[inline]
+fn find_newline(s: &[u8]) -> Option<usize> {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    const NL: u64 = 0x0a0a_0a0a_0a0a_0a0a;
+    let mut i = 0;
+    while i + 8 <= s.len() {
+        let w = u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+        let x = w ^ NL;
+        let found = x.wrapping_sub(LO) & !x & HI;
+        if found != 0 {
+            return Some(i + (found.trailing_zeros() >> 3) as usize)
+        }
+        i += 8;
+    }
+    while i < s.len() {
+        if s[i] == b'\n' {
+            return Some(i)
+        }
+        i += 1;
+    }
+    None
+}
+
+struct Cur<'s> {
+    s: &'s [u8],
+    i: usize,
+}
+
+impl<'s> Cur<'s> {
+    #[inline(always)]
+    fn lit(&mut self, l: &[u8]) -> Result<(), Fallback> {
+        if self.s.len() - self.i < l.len() || &self.s[self.i..self.i + l.len()] != l {
+            return Err(Fallback)
+        }
+        self.i += l.len();
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn peek(&self, ahead: usize) -> Result<u8, Fallback> { self.s.get(self.i + ahead).copied().ok_or(Fallback) }
+
+    #[inline(always)]
+    fn uint(&mut self) -> Result<u64, Fallback> {
+        let start = self.i;
+        let mut x = 0u64;
+        while self.i < self.s.len() {
+            let d = self.s[self.i].wrapping_sub(b'0');
+            if d > 9 {
+                break
+            }
+            x = x * 10 + u64::from(d);
+            self.i += 1;
+        }
+        if self.i == start || self.i - start > 19 {
+            return Err(Fallback)
+        }
+        Ok(x)
+    }
+
+    #[inline(always)]
+    fn uint_u16(&mut self) -> Result<u16, Fallback> { self.uint()?.try_into().map_err(|_| Fallback) }
+
+    #[inline(always)]
+    fn uint_u32(&mut self) -> Result<u32, Fallback> { self.uint()?.try_into().map_err(|_| Fallback) }
+
+    #[inline(always)]
+    fn uint_usize(&mut self) -> Result<usize, Fallback> { self.uint()?.try_into().map_err(|_| Fallback) }
+
+    #[inline(always)]
+    fn quoted(&mut self) -> Result<&'s [u8], Fallback> {
+        self.lit(b"\"")?;
+        let start = self.i;
+        while self.i < self.s.len() {
+            match self.s[self.i] {
+                b'"' => {
+                    let r = &self.s[start..self.i];
+                    self.i += 1;
+                    return Ok(r)
+                }
+                b'\\' => return Err(Fallback),
+                _ => self.i += 1,
+            }
+        }
+        Err(Fallback)
+    }
+
+    #[inline(always)]
+    fn quoted_str(&mut self) -> Result<&'s str, Fallback> {
+        std::str::from_utf8(self.quoted()?).map_err(|_| Fallback)
+    }
+
+    #[inline(always)]
+    fn boolean(&mut self) -> Result<bool, Fallback> {
+        if self.peek(0)? == b't' {
+            self.lit(b"true")?;
+            Ok(true)
+        } else {
+            self.lit(b"false")?;
+            Ok(false)
+        }
+    }
+
+    #[inline]
+    fn u32_array(&mut self, out: &mut Vec<u32>) -> Result<(), Fallback> {
+        self.lit(b"[")?;
+        if self.peek(0)? == b']' {
+            self.i += 1;
+            return Ok(())
+        }
+        loop {
+            out.push(self.uint_u32()?);
+            match self.peek(0)? {
+                b',' => self.i += 1,
+                b']' => {
+                    self.i += 1;
+                    return Ok(())
+                }
+                _ => return Err(Fallback),
+            }
+        }
+    }
+
+    #[inline]
+    fn skip_u32_array(&mut self) -> Result<(), Fallback> {
+        self.lit(b"[")?;
+        if self.peek(0)? == b']' {
+            self.i += 1;
+            return Ok(())
+        }
+        loop {
+            self.uint()?;
+            match self.peek(0)? {
+                b',' => self.i += 1,
+                b']' => {
+                    self.i += 1;
+                    return Ok(())
+                }
+                _ => return Err(Fallback),
+            }
+        }
+    }
+
+    #[inline]
+    fn hint(&mut self) -> Result<ReducibilityHint, Fallback> {
+        if self.peek(0)? == b'{' {
+            self.lit(b"{\"regular\":")?;
+            let depth = self.uint_u16()?;
+            self.lit(b"}")?;
+            return Ok(ReducibilityHint::Regular(depth))
+        }
+        match self.quoted()? {
+            b"abbrev" => Ok(ReducibilityHint::Abbrev),
+            b"opaque" => Ok(ReducibilityHint::Opaque),
+            _ => Err(Fallback),
+        }
+    }
+
+    #[inline]
+    fn binder_style(&mut self) -> Result<BinderStyle, Fallback> {
+        match self.quoted()? {
+            b"default" => Ok(BinderStyle::Default),
+            b"implicit" => Ok(BinderStyle::Implicit),
+            b"strictImplicit" => Ok(BinderStyle::StrictImplicit),
+            b"instImplicit" => Ok(BinderStyle::InstanceImplicit),
+            _ => Err(Fallback),
+        }
+    }
+
+    #[inline(always)]
+    fn done(&self) -> Result<(), Fallback> {
+        if self.i == self.s.len() {
+            Ok(())
+        } else {
+            Err(Fallback)
+        }
+    }
+}
+
+enum FastVal<'s> {
+    NameStr { i: u32, pre: u32, s: &'s str },
+    NameNum { i: u32, pre: u32, n: u32 },
+    NatLit { i: u32, s: &'s [u8] },
+    StrLit { i: u32, s: &'s str },
+    LevelSucc { i: u32, l: u32 },
+    LevelMax { i: u32, l: u32, r: u32 },
+    LevelIMax { i: u32, l: u32, r: u32 },
+    LevelParam { i: u32, n: u32 },
+    Sort { i: u32, level: u32 },
+    Const { i: u32, name: u32 },
+    App { i: u32, fun: u32, arg: u32 },
+    BVar { i: u32, dbj_idx: u16 },
+    Lambda { i: u32, binder_name: u32, binder_type: u32, body: u32, style: BinderStyle },
+    Pi { i: u32, binder_name: u32, binder_type: u32, body: u32, style: BinderStyle },
+    Let { i: u32, binder_name: u32, binder_type: u32, val: u32, body: u32, nondep: bool },
+    Proj { i: u32, ty_name: u32, idx: usize, structure: u32 },
+    Def { name: u32, ty: u32, val: u32, hint: ReducibilityHint },
+    Thm { name: u32, ty: u32, val: u32 },
+}
+
+fn fast_match<'s>(s: &'s [u8], idxs: &mut Vec<u32>) -> Result<FastVal<'s>, Fallback> {
+    if s.len() < 8 {
+        return Err(Fallback)
+    }
+    let mut c = Cur { s, i: 0 };
+    match s[2] {
+        b'i' => match s[3] {
+            b'e' => {
+                c.lit(b"{\"ie\":")?;
+                let i = c.uint_u32()?;
+                c.lit(b",\"")?;
+                match c.peek(0)? {
+                    b'l' => match c.peek(1)? {
+                        b'a' => {
+                            c.lit(b"lam\":{\"binderInfo\":")?;
+                            let style = c.binder_style()?;
+                            c.lit(b",\"body\":")?;
+                            let body = c.uint_u32()?;
+                            c.lit(b",\"name\":")?;
+                            let binder_name = c.uint_u32()?;
+                            c.lit(b",\"type\":")?;
+                            let binder_type = c.uint_u32()?;
+                            c.lit(b"}}")?;
+                            c.done()?;
+                            Ok(FastVal::Lambda { i, binder_name, binder_type, body, style })
+                        }
+                        b'e' => {
+                            c.lit(b"letE\":{\"body\":")?;
+                            let body = c.uint_u32()?;
+                            c.lit(b",\"name\":")?;
+                            let binder_name = c.uint_u32()?;
+                            c.lit(b",\"nondep\":")?;
+                            let nondep = c.boolean()?;
+                            c.lit(b",\"type\":")?;
+                            let binder_type = c.uint_u32()?;
+                            c.lit(b",\"value\":")?;
+                            let val = c.uint_u32()?;
+                            c.lit(b"}}")?;
+                            c.done()?;
+                            Ok(FastVal::Let { i, binder_name, binder_type, val, body, nondep })
+                        }
+                        _ => Err(Fallback),
+                    },
+                    b'n' => {
+                        c.lit(b"natVal\":")?;
+                        let s = c.quoted()?;
+                        c.lit(b"}")?;
+                        c.done()?;
+                        Ok(FastVal::NatLit { i, s })
+                    }
+                    b'p' => {
+                        c.lit(b"proj\":{\"idx\":")?;
+                        let idx = c.uint_usize()?;
+                        c.lit(b",\"struct\":")?;
+                        let structure = c.uint_u32()?;
+                        c.lit(b",\"typeName\":")?;
+                        let ty_name = c.uint_u32()?;
+                        c.lit(b"}}")?;
+                        c.done()?;
+                        Ok(FastVal::Proj { i, ty_name, idx, structure })
+                    }
+                    b's' => match c.peek(1)? {
+                        b'o' => {
+                            c.lit(b"sort\":")?;
+                            let level = c.uint_u32()?;
+                            c.lit(b"}")?;
+                            c.done()?;
+                            Ok(FastVal::Sort { i, level })
+                        }
+                        b't' => {
+                            c.lit(b"strVal\":")?;
+                            let s = c.quoted_str()?;
+                            c.lit(b"}")?;
+                            c.done()?;
+                            Ok(FastVal::StrLit { i, s })
+                        }
+                        _ => Err(Fallback),
+                    },
+                    _ => Err(Fallback),
+                }
+            }
+            b'l' => {
+                c.lit(b"{\"il\":")?;
+                let i = c.uint_u32()?;
+                c.lit(b",\"")?;
+                match c.peek(0)? {
+                    b'i' => {
+                        c.lit(b"imax\":[")?;
+                        let l = c.uint_u32()?;
+                        c.lit(b",")?;
+                        let r = c.uint_u32()?;
+                        c.lit(b"]}")?;
+                        c.done()?;
+                        Ok(FastVal::LevelIMax { i, l, r })
+                    }
+                    b'm' => {
+                        c.lit(b"max\":[")?;
+                        let l = c.uint_u32()?;
+                        c.lit(b",")?;
+                        let r = c.uint_u32()?;
+                        c.lit(b"]}")?;
+                        c.done()?;
+                        Ok(FastVal::LevelMax { i, l, r })
+                    }
+                    b'p' => {
+                        c.lit(b"param\":")?;
+                        let n = c.uint_u32()?;
+                        c.lit(b"}")?;
+                        c.done()?;
+                        Ok(FastVal::LevelParam { i, n })
+                    }
+                    b's' => {
+                        c.lit(b"succ\":")?;
+                        let l = c.uint_u32()?;
+                        c.lit(b"}")?;
+                        c.done()?;
+                        Ok(FastVal::LevelSucc { i, l })
+                    }
+                    _ => Err(Fallback),
+                }
+            }
+            b'n' => {
+                c.lit(b"{\"in\":")?;
+                let i = c.uint_u32()?;
+                c.lit(b",\"")?;
+                match c.peek(0)? {
+                    b'n' => {
+                        c.lit(b"num\":{\"i\":")?;
+                        let n = c.uint_u32()?;
+                        c.lit(b",\"pre\":")?;
+                        let pre = c.uint_u32()?;
+                        c.lit(b"}}")?;
+                        c.done()?;
+                        Ok(FastVal::NameNum { i, pre, n })
+                    }
+                    b's' => {
+                        c.lit(b"str\":{\"pre\":")?;
+                        let pre = c.uint_u32()?;
+                        c.lit(b",\"str\":")?;
+                        let s = c.quoted_str()?;
+                        c.lit(b"}}")?;
+                        c.done()?;
+                        Ok(FastVal::NameStr { i, pre, s })
+                    }
+                    _ => Err(Fallback),
+                }
+            }
+            _ => Err(Fallback),
+        },
+        b'a' => {
+            c.lit(b"{\"app\":{\"arg\":")?;
+            let arg = c.uint_u32()?;
+            c.lit(b",\"fn\":")?;
+            let fun = c.uint_u32()?;
+            c.lit(b"},\"ie\":")?;
+            let i = c.uint_u32()?;
+            c.lit(b"}")?;
+            c.done()?;
+            Ok(FastVal::App { i, fun, arg })
+        }
+        b'b' => {
+            c.lit(b"{\"bvar\":")?;
+            let dbj_idx = c.uint_u16()?;
+            c.lit(b",\"ie\":")?;
+            let i = c.uint_u32()?;
+            c.lit(b"}")?;
+            c.done()?;
+            Ok(FastVal::BVar { i, dbj_idx })
+        }
+        b'c' => {
+            c.lit(b"{\"const\":{\"name\":")?;
+            let name = c.uint_u32()?;
+            c.lit(b",\"us\":")?;
+            c.u32_array(idxs)?;
+            c.lit(b"},\"ie\":")?;
+            let i = c.uint_u32()?;
+            c.lit(b"}")?;
+            c.done()?;
+            Ok(FastVal::Const { i, name })
+        }
+        b'd' => {
+            c.lit(b"{\"def\":{\"all\":")?;
+            c.skip_u32_array()?;
+            c.lit(b",\"hints\":")?;
+            let hint = c.hint()?;
+            c.lit(b",\"levelParams\":")?;
+            c.u32_array(idxs)?;
+            c.lit(b",\"name\":")?;
+            let name = c.uint_u32()?;
+            c.lit(b",\"safety\":\"safe\",\"type\":")?;
+            let ty = c.uint_u32()?;
+            c.lit(b",\"value\":")?;
+            let val = c.uint_u32()?;
+            c.lit(b"}}")?;
+            c.done()?;
+            Ok(FastVal::Def { name, ty, val, hint })
+        }
+        b'f' => {
+            c.lit(b"{\"forallE\":{\"binderInfo\":")?;
+            let style = c.binder_style()?;
+            c.lit(b",\"body\":")?;
+            let body = c.uint_u32()?;
+            c.lit(b",\"name\":")?;
+            let binder_name = c.uint_u32()?;
+            c.lit(b",\"type\":")?;
+            let binder_type = c.uint_u32()?;
+            c.lit(b"},\"ie\":")?;
+            let i = c.uint_u32()?;
+            c.lit(b"}")?;
+            c.done()?;
+            Ok(FastVal::Pi { i, binder_name, binder_type, body, style })
+        }
+        b't' => {
+            c.lit(b"{\"thm\":{\"all\":")?;
+            c.skip_u32_array()?;
+            c.lit(b",\"levelParams\":")?;
+            c.u32_array(idxs)?;
+            c.lit(b",\"name\":")?;
+            let name = c.uint_u32()?;
+            c.lit(b",\"type\":")?;
+            let ty = c.uint_u32()?;
+            c.lit(b",\"value\":")?;
+            let val = c.uint_u32()?;
+            c.lit(b"}}")?;
+            c.done()?;
+            Ok(FastVal::Thm { name, ty, val })
+        }
+        _ => Err(Fallback),
+    }
 }
 
 impl<'a, R: BufRead> Parser<'a, R> {
@@ -415,7 +855,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
             notations: new_fx_hash_map(),
             config,
             skipped: Vec::new(),
-            mutual_block_sizes: new_fx_hash_map()
+            mutual_block_sizes: new_fx_hash_map(),
+            scratch_idxs: Vec::new(),
+            pending_exprs: Vec::new()
         }
     }
     
@@ -444,10 +886,10 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     fn push_expr(&mut self, expected: BackRef, e: Expr<'a>) {
-        if self.dag.exprs.get(&e).is_some() {
-            panic!("Attempted to insert duplicate Expr");
-        }
-        let ptr = ExprPtr::global(self.dag.exprs.insert(self.arena, e));
+        let hash = crate::util::RawHash::raw_hash(&e);
+        let r: &'a Expr<'a> = self.arena.alloc(e);
+        self.pending_exprs.push((hash, r));
+        let ptr = ExprPtr::global(r);
         let i = expected.index() as usize;
         if i >= self.exprs_by_idx.len() {
             self.exprs_by_idx.resize(i + 1, None);
@@ -460,9 +902,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
             self.config.permitted_axioms.as_ref().map(|v| v.contains(&self.name_to_string(n))).unwrap_or(false)
     }
 
-    fn num_loose_bvars(&self, e: ExprPtr<'a>) -> u16 { e.as_ref().num_loose_bvars() }
+    fn num_loose_bvars(&self, e: ExprPtr<'a>) -> u16 { e.num_loose_bvars() }
 
-    fn has_fvars(&self, e: ExprPtr<'a>) -> bool { e.as_ref().has_fvars() }
+    fn has_fvars(&self, e: ExprPtr<'a>) -> bool { e.has_fvars() }
 
     fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> {
         self.names_by_idx.get(idx as usize).copied().flatten()
@@ -519,173 +961,277 @@ impl<'a, R: BufRead> Parser<'a, R> {
         }
     }
 
-    fn go1(&mut self, line: &str) -> Result<(), Box<dyn Error>> {
+    fn go1(&mut self, line: &[u8]) -> Result<(), Box<dyn Error>> {
+        let mut trimmed = line;
+        while let [rest @ .., last] = trimmed {
+            if !last.is_ascii_whitespace() {
+                break
+            }
+            trimmed = rest;
+        }
+        let mut idxs = std::mem::take(&mut self.scratch_idxs);
+        idxs.clear();
+        let out = match fast_match(trimmed, &mut idxs) {
+            Ok(v) => self.apply_fast(v, &idxs),
+            Err(Fallback) => std::str::from_utf8(line).map_err(Box::<dyn Error>::from).and_then(|s| self.go1_general(s)),
+        };
+        self.scratch_idxs = idxs;
+        out
+    }
+
+    fn apply_fast(&mut self, v: FastVal<'_>, idxs: &[u32]) -> Result<(), Box<dyn Error>> {
+        match v {
+            FastVal::NameStr { i, pre, s } => Ok(self.do_name_str(BackRef::In(i), pre, s)),
+            FastVal::NameNum { i, pre, n } => Ok(self.do_name_num(BackRef::In(i), pre, u64::from(n))),
+            FastVal::NatLit { i, s } => {
+                let big = BigUint::parse_bytes(s, 10)
+                    .ok_or_else(|| Box::<dyn Error>::from("invalid BigUint decimal string".to_string()))?;
+                self.do_nat_lit(BackRef::Ie(i), big)
+            }
+            FastVal::StrLit { i, s } => self.do_str_lit(BackRef::Ie(i), s),
+            FastVal::LevelSucc { i, l } => Ok(self.do_succ(BackRef::Il(i), l)),
+            FastVal::LevelMax { i, l, r } => Ok(self.do_max(BackRef::Il(i), l, r)),
+            FastVal::LevelIMax { i, l, r } => Ok(self.do_imax(BackRef::Il(i), l, r)),
+            FastVal::LevelParam { i, n } => Ok(self.do_level_param(BackRef::Il(i), n)),
+            FastVal::Sort { i, level } => Ok(self.do_sort(BackRef::Ie(i), level)),
+            FastVal::Const { i, name } => Ok(self.do_const(BackRef::Ie(i), name, idxs)),
+            FastVal::App { i, fun, arg } => Ok(self.do_app(BackRef::Ie(i), fun, arg)),
+            FastVal::BVar { i, dbj_idx } => self.do_bvar(BackRef::Ie(i), dbj_idx),
+            FastVal::Lambda { i, binder_name, binder_type, body, style } =>
+                Ok(self.do_lambda(BackRef::Ie(i), binder_name, binder_type, body, style)),
+            FastVal::Pi { i, binder_name, binder_type, body, style } =>
+                Ok(self.do_pi(BackRef::Ie(i), binder_name, binder_type, body, style)),
+            FastVal::Let { i, binder_name, binder_type, val, body, nondep } =>
+                Ok(self.do_let(BackRef::Ie(i), binder_name, binder_type, val, body, nondep)),
+            FastVal::Proj { i, ty_name, idx, structure } => Ok(self.do_proj(BackRef::Ie(i), ty_name, idx, structure)),
+            FastVal::Def { name, ty, val, hint } => Ok(self.do_def(name, ty, val, idxs, hint)),
+            FastVal::Thm { name, ty, val } => Ok(self.do_thm(name, ty, val, idxs)),
+        }
+    }
+
+    fn do_name_str(&mut self, idx: BackRef, pre: u32, s: &str) {
+        let pfx = self.get_name_ptr(pre);
+        let sfx = StringPtr::global(self.dag.strings.intern(self.arena, Cow::Owned(s.to_string())));
+        let hash = hash64!(crate::name::STR_HASH, pfx, sfx);
+        self.push_name(idx, Name::Str(pfx, sfx, hash));
+    }
+
+    fn do_name_num(&mut self, idx: BackRef, pre: u32, sfx: u64) {
+        let pfx = self.get_name_ptr(pre);
+        let hash = hash64!(crate::name::NUM_HASH, pfx, sfx);
+        self.push_name(idx, Name::Num(pfx, sfx, hash));
+    }
+
+    fn do_nat_lit(&mut self, idx: BackRef, big_uint: BigUint) -> Result<(), Box<dyn Error>> {
+        if !self.config.nat_extension {
+            return Err(Box::<dyn Error>::from(
+                "Nat lit extension disallowed by checker execution config, but export file contains a nat literal".to_string()
+            ));
+        }
+        let num_ptr = BigUintPtr::global(self.dag.bignums.as_mut().unwrap().intern(self.arena, big_uint));
+        let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
+        self.push_expr(idx, Expr::NatLit { ptr: num_ptr, hash });
+        Ok(())
+    }
+
+    fn do_str_lit(&mut self, idx: BackRef, s: &str) -> Result<(), Box<dyn Error>> {
+        if !self.config.string_extension {
+            return Err(Box::<dyn Error>::from(
+                "String lit extension disallowed by checker execution config, but export file contains a string literal".to_string()
+            ));
+        }
+        let string_ptr = StringPtr::global(self.dag.strings.intern(self.arena, crate::util::CowStr::Owned(s.to_string())));
+        let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
+        self.push_expr(idx, Expr::StringLit { ptr: string_ptr, hash });
+        Ok(())
+    }
+
+    fn do_succ(&mut self, idx: BackRef, l: u32) {
+        let l = self.get_level_ptr(l);
+        let hash = hash64!(crate::level::SUCC_HASH, l);
+        self.push_level(idx, Level::Succ(l, hash));
+    }
+
+    fn do_max(&mut self, idx: BackRef, l: u32, r: u32) {
+        let l = self.get_level_ptr(l);
+        let r = self.get_level_ptr(r);
+        let hash = hash64!(crate::level::MAX_HASH, l, r);
+        self.push_level(idx, Level::Max(l, r, hash));
+    }
+
+    fn do_imax(&mut self, idx: BackRef, l: u32, r: u32) {
+        let l = self.get_level_ptr(l);
+        let r = self.get_level_ptr(r);
+        let hash = hash64!(crate::level::IMAX_HASH, l, r);
+        self.push_level(idx, Level::IMax(l, r, hash));
+    }
+
+    fn do_level_param(&mut self, idx: BackRef, n: u32) {
+        let n = self.get_name_ptr(n);
+        let hash = hash64!(crate::level::PARAM_HASH, n);
+        self.push_level(idx, Level::Param(n, hash));
+    }
+
+    fn do_sort(&mut self, idx: BackRef, level: u32) {
+        let level = self.get_level_ptr(level);
+        let hash = hash64!(crate::expr::SORT_HASH, level);
+        self.push_expr(idx, Expr::Sort { level, hash });
+    }
+
+    fn do_const(&mut self, idx: BackRef, name: u32, us: &[u32]) {
+        let name = self.get_name_ptr(name);
+        let levels = self.get_levels_ptr(us);
+        let hash = hash64!(crate::expr::CONST_HASH, name, levels);
+        self.push_expr(idx, Expr::Const { name, levels, hash });
+    }
+
+    fn do_app(&mut self, idx: BackRef, fun: u32, arg: u32) {
+        let fun = self.get_expr_ptr(fun);
+        let arg = self.get_expr_ptr(arg);
+        let hash = hash64!(crate::expr::APP_HASH, fun, arg);
+        let num_bvars = self.num_loose_bvars(fun).max(self.num_loose_bvars(arg));
+        let locals = self.has_fvars(fun) || self.has_fvars(arg);
+        self.push_expr(idx, Expr::App { fun, arg, num_loose_bvars: num_bvars, has_fvars: locals, hash });
+    }
+
+    fn do_bvar(&mut self, idx: BackRef, dbj_idx: u16) -> Result<(), Box<dyn Error>> {
+        if dbj_idx == u16::MAX {
+            return Err(Box::<dyn Error>::from("bvar index too large".to_string()))
+        }
+        let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
+        self.push_expr(idx, Expr::Var { dbj_idx, hash });
+        Ok(())
+    }
+
+    fn do_lambda(&mut self, idx: BackRef, binder_name: u32, binder_type: u32, body: u32, binder_info: BinderStyle) {
+        let binder_name = self.get_name_ptr(binder_name);
+        let binder_type = self.get_expr_ptr(binder_type);
+        let body = self.get_expr_ptr(body);
+        let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, binder_type, body);
+        let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
+        let locals = self.has_fvars(binder_type) || self.has_fvars(body);
+        self.push_expr(
+            idx,
+            Expr::Lambda {
+                binder_name,
+                binder_style: binder_info,
+                binder_type,
+                body,
+                num_loose_bvars: num_bvars,
+                has_fvars: locals,
+                hash,
+            },
+        );
+    }
+
+    fn do_pi(&mut self, idx: BackRef, binder_name: u32, binder_type: u32, body: u32, binder_info: BinderStyle) {
+        let binder_name = self.get_name_ptr(binder_name);
+        let binder_type = self.get_expr_ptr(binder_type);
+        let body = self.get_expr_ptr(body);
+        let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, binder_type, body);
+        let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
+        let locals = self.has_fvars(binder_type) || self.has_fvars(body);
+        self.push_expr(
+            idx,
+            Expr::Pi {
+                binder_name,
+                binder_style: binder_info,
+                binder_type,
+                body,
+                num_loose_bvars: num_bvars,
+                has_fvars: locals,
+                hash,
+            },
+        );
+    }
+
+    fn do_let(&mut self, idx: BackRef, name: u32, ty: u32, value: u32, body: u32, nondep: bool) {
+        let binder_name = self.get_name_ptr(name);
+        let binder_type = self.get_expr_ptr(ty);
+        let val = self.get_expr_ptr(value);
+        let body = self.get_expr_ptr(body);
+        let hash = hash64!(crate::expr::LET_HASH, binder_name, binder_type, val, body, nondep);
+        let num_bvars = self
+            .num_loose_bvars(binder_type)
+            .max(self.num_loose_bvars(val).max(self.num_loose_bvars(body).saturating_sub(1)));
+        let locals = self.has_fvars(binder_type) || self.has_fvars(val) || self.has_fvars(body);
+        self.push_expr(
+            idx,
+            Expr::Let {
+                binder_name,
+                binder_type,
+                val,
+                body,
+                num_loose_bvars: num_bvars,
+                has_fvars: locals,
+                hash,
+                nondep,
+            },
+        );
+    }
+
+    fn do_proj(&mut self, idx: BackRef, type_name: u32, proj_idx: usize, struct_: u32) {
+        let ty_name = self.get_name_ptr(type_name);
+        let structure = self.get_expr_ptr(struct_);
+        let hash = hash64!(crate::expr::PROJ_HASH, ty_name, proj_idx, structure);
+        let num_bvars = self.num_loose_bvars(structure);
+        let locals = self.has_fvars(structure);
+        self.push_expr(
+            idx,
+            Expr::Proj { ty_name, idx: proj_idx, structure, num_loose_bvars: num_bvars, has_fvars: locals, hash },
+        );
+    }
+
+    fn do_def(&mut self, name: u32, ty: u32, value: u32, uparams: &[u32], hint: ReducibilityHint) {
+        let name = self.get_name_ptr(name);
+        let ty = self.get_expr_ptr(ty);
+        let val = self.get_expr_ptr(value);
+        let uparams = self.get_uparams_ptr(uparams);
+        let info = DeclarInfo { name, ty, uparams };
+        let definition = Declar::Definition { info, val, hint };
+        assert!(self.declars.insert(name, definition).is_none());
+    }
+
+    fn do_thm(&mut self, name: u32, ty: u32, value: u32, uparams: &[u32]) {
+        let name = self.get_name_ptr(name);
+        let ty = self.get_expr_ptr(ty);
+        let val = self.get_expr_ptr(value);
+        let uparams = self.get_uparams_ptr(uparams);
+        let info = DeclarInfo { name, ty, uparams };
+        let theorem = Declar::Theorem { info, val };
+        assert!(self.declars.insert(name, theorem).is_none());
+    }
+
+    fn go1_general(&mut self, line: &str) -> Result<(), Box<dyn Error>> {
         use ExportJsonVal::*;
-        let arena = self.arena;
         let ExportJsonObject {val, i: assigned_idx} = serde_json::from_str::<ExportJsonObject>(line)?;
         match val {
             Metadata(json_val) => {
                 let _ = check_semver(&json_val)?;
             }
-            NameStr {pre, str} => {
-                let pfx = self.get_name_ptr(pre);
-                let sfx = StringPtr::global(self.dag.strings.intern(arena, Cow::Owned(str.to_string())));
-                let hash = hash64!(crate::name::STR_HASH, pfx, sfx);
-                self.push_name(assigned_idx.unwrap(), Name::Str(pfx, sfx, hash));
-            }
-            NameNum {pre, i} => {
-                let pfx = self.get_name_ptr(pre);
-                let sfx = i as u64;
-                let hash = hash64!(crate::name::NUM_HASH, pfx, sfx);
-                self.push_name(assigned_idx.unwrap(), Name::Num(pfx, sfx, hash));
-            }
-            NatLit(big_uint) => {
-                if !self.config.nat_extension {
-                    return Err(Box::<dyn Error>::from(
-                        format!("Nat lit extension disallowed by checker execution config, but export file contains a nat literal {:?}", line)
-                    ));
-                }
-                let num_ptr = BigUintPtr::global(self.dag.bignums.as_mut().unwrap().intern(arena, big_uint));
-                let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-                self.push_expr(assigned_idx.unwrap(), Expr::NatLit { ptr: num_ptr, hash });
-            }
-            StrLit(cow_str) => {
-                if !self.config.string_extension {
-                    return Err(Box::<dyn Error>::from(
-                        format!("String lit extension disallowed by checker execution config, but export file contains a string literal {:?}", line)
-                    ));
-                }
-                let s = cow_str.to_string();
-                let string_ptr = StringPtr::global(self.dag.strings.intern(arena, crate::util::CowStr::Owned(s)));
-                let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-                self.push_expr(assigned_idx.unwrap(), Expr::StringLit { ptr: string_ptr, hash });
-            }
-            LevelSucc(l) => {
-                let l = self.get_level_ptr(l);
-                let hash = hash64!(crate::level::SUCC_HASH, l);
-                self.push_level(assigned_idx.unwrap(), Level::Succ(l, hash));
-            }
-            LevelMax([l, r]) => {
-                let l = self.get_level_ptr(l);
-                let r = self.get_level_ptr(r);
-                let hash = hash64!(crate::level::MAX_HASH, l, r);
-                self.push_level(assigned_idx.unwrap(), Level::Max(l, r, hash));
-            }
-            LevelIMax([l, r]) => {
-                let l = self.get_level_ptr(l);
-                let r = self.get_level_ptr(r);
-                let hash = hash64!(crate::level::IMAX_HASH, l, r);
-                self.push_level(assigned_idx.unwrap(), Level::IMax(l, r, hash));
-            }
-            LevelParam(var_idx) => {
-                let n = self.get_name_ptr(var_idx);
-                let hash = hash64!(crate::level::PARAM_HASH, n);
-                self.push_level(assigned_idx.unwrap(), Level::Param(n, hash));
-            }
-            ExprSort(level) => {
-                let level = self.get_level_ptr(level);
-                let hash = hash64!(crate::expr::SORT_HASH, level);
-                self.push_expr(assigned_idx.unwrap(), Expr::Sort { level, hash });
-            }
+            NameStr {pre, str} => self.do_name_str(assigned_idx.unwrap(), pre, &str),
+            NameNum {pre, i} => self.do_name_num(assigned_idx.unwrap(), pre, i as u64),
+            NatLit(big_uint) => self.do_nat_lit(assigned_idx.unwrap(), big_uint)?,
+            StrLit(cow_str) => self.do_str_lit(assigned_idx.unwrap(), &cow_str)?,
+            LevelSucc(l) => self.do_succ(assigned_idx.unwrap(), l),
+            LevelMax([l, r]) => self.do_max(assigned_idx.unwrap(), l, r),
+            LevelIMax([l, r]) => self.do_imax(assigned_idx.unwrap(), l, r),
+            LevelParam(var_idx) => self.do_level_param(assigned_idx.unwrap(), var_idx),
+            ExprSort(level) => self.do_sort(assigned_idx.unwrap(), level),
             ExprMData {..} => {
                 panic!("Expr.mdata not supported");
             }
-            ExprConst {name, levels} => {
-                let name = self.get_name_ptr(name);
-                let levels = self.get_levels_ptr(&levels);
-                let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-                self.push_expr(assigned_idx.unwrap(), Expr::Const { name, levels, hash });
-            }
-            ExprApp {fun, arg} => {
-                let fun = self.get_expr_ptr(fun);
-                let arg = self.get_expr_ptr(arg);
-                let hash = hash64!(crate::expr::APP_HASH, fun, arg);
-                let num_bvars = self.num_loose_bvars(fun).max(self.num_loose_bvars(arg));
-                let locals = self.has_fvars(fun) || self.has_fvars(arg);
-                self.push_expr(
-                    assigned_idx.unwrap(),
-                    Expr::App { fun, arg, num_loose_bvars: num_bvars, has_fvars: locals, hash },
-                );
-            }
-            ExprBVar(dbj_idx) => {
-                let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-                self.push_expr(assigned_idx.unwrap(), Expr::Var { dbj_idx, hash });
-            }
-            ExprLambda {binder_name, binder_type, binder_info, body} => {
-                let binder_name = self.get_name_ptr(binder_name);
-                let binder_type = self.get_expr_ptr(binder_type);
-                let body = self.get_expr_ptr(body);
-                let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, binder_type, body);
-                let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
-                let locals = self.has_fvars(binder_type) || self.has_fvars(body);
-                self.push_expr(
-                    assigned_idx.unwrap(),
-                    Expr::Lambda {
-                        binder_name,
-                        binder_style: binder_info,
-                        binder_type,
-                        body,
-                        num_loose_bvars: num_bvars,
-                        has_fvars: locals,
-                        hash,
-                    },
-                );
-            }
-            ExprPi {binder_name, binder_type, binder_info, body} => {
-                let binder_name = self.get_name_ptr(binder_name);
-                let binder_type = self.get_expr_ptr(binder_type);
-                let body = self.get_expr_ptr(body);
-                let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, binder_type, body);
-                let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
-                let locals = self.has_fvars(binder_type) || self.has_fvars(body);
-                self.push_expr(
-                    assigned_idx.unwrap(),
-                    Expr::Pi {
-                        binder_name,
-                        binder_style: binder_info,
-                        binder_type,
-                        body,
-                        num_loose_bvars: num_bvars,
-                        has_fvars: locals,
-                        hash,
-                    },
-                );
-            }
-            ExprLet {name, ty, value, body, nondep} => {
-                let binder_name = self.get_name_ptr(name);
-                let binder_type = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
-                let body = self.get_expr_ptr(body);
-                let hash = hash64!(crate::expr::LET_HASH, binder_name, binder_type, val, body, nondep);
-                let num_bvars = self
-                    .num_loose_bvars(binder_type)
-                    .max(self.num_loose_bvars(val).max(self.num_loose_bvars(body).saturating_sub(1)));
-                let locals = self.has_fvars(binder_type) || self.has_fvars(val) || self.has_fvars(body);
-                self.push_expr(
-                    assigned_idx.unwrap(),
-                    Expr::Let {
-                        binder_name,
-                        binder_type,
-                        val,
-                        body,
-                        num_loose_bvars: num_bvars,
-                        has_fvars: locals,
-                        hash,
-                        nondep,
-                    },
-                );
-            }
-            ExprProj {type_name, idx, structure: struct_} => {
-                let ty_name = self.get_name_ptr(type_name);
-                let structure = self.get_expr_ptr(struct_);
-                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
-                let num_bvars = self.num_loose_bvars(structure);
-                let locals = self.has_fvars(structure);
-                self.push_expr(
-                    assigned_idx.unwrap(),
-                    Expr::Proj { ty_name, idx, structure, num_loose_bvars: num_bvars, has_fvars: locals, hash },
-                );
-            }
+            ExprConst {name, levels} => self.do_const(assigned_idx.unwrap(), name, &levels),
+            ExprApp {fun, arg} => self.do_app(assigned_idx.unwrap(), fun, arg),
+            ExprBVar(dbj_idx) => self.do_bvar(assigned_idx.unwrap(), dbj_idx)?,
+            ExprLambda {binder_name, binder_type, binder_info, body} =>
+                self.do_lambda(assigned_idx.unwrap(), binder_name, binder_type, body, binder_info),
+            ExprPi {binder_name, binder_type, binder_info, body} =>
+                self.do_pi(assigned_idx.unwrap(), binder_name, binder_type, body, binder_info),
+            ExprLet {name, ty, value, body, nondep} =>
+                self.do_let(assigned_idx.unwrap(), name, ty, value, body, nondep),
+            ExprProj {type_name, idx, structure: struct_} =>
+                self.do_proj(assigned_idx.unwrap(), type_name, idx, struct_),
             Axiom {name, ty, uparams, is_unsafe} => {
                 assert!(!is_unsafe);
                 let name = self.get_name_ptr(name);
@@ -706,23 +1252,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             Defn {name, ty, uparams, value, hint, safety} => {
                 assert!(!matches!(safety, DefinitionSafety::Unsafe | DefinitionSafety::Partial));
-                let name = self.get_name_ptr(name);
-                let ty = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
-                let uparams = self.get_uparams_ptr(&uparams);
-                let info = DeclarInfo { name, ty, uparams };
-                let definition = Declar::Definition { info, val, hint };
-                assert!(self.declars.insert(name, definition).is_none());
+                self.do_def(name, ty, value, &uparams, hint);
             }
-            Thm {name, ty, uparams, value} => {
-                let name = self.get_name_ptr(name);
-                let ty = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
-                let uparams = self.get_uparams_ptr(&uparams);
-                let info = DeclarInfo { name, ty, uparams };
-                let theorem = Declar::Theorem { info, val };
-                assert!(self.declars.insert(name, theorem).is_none());
-            }
+            Thm {name, ty, uparams, value} => self.do_thm(name, ty, value, &uparams),
             Opaque {name, ty, uparams, value, is_unsafe} => {
                 assert!(!is_unsafe);
                 let name = self.get_name_ptr(name);

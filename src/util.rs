@@ -60,6 +60,15 @@ impl<T: Hash + ?Sized> StructHash for T {
     }
 }
 
+pub(crate) trait RawHash {
+    fn raw_hash(&self) -> u64;
+}
+
+impl RawHash for CowStr<'_> {
+    #[inline]
+    fn raw_hash(&self) -> u64 { self.struct_hash() }
+}
+
 macro_rules! tagged_ptr {
     ($(#[$m:meta])* $name:ident, $pointee:ty) => {
         $(#[$m])*
@@ -136,11 +145,84 @@ macro_rules! tagged_ptr {
 tagged_ptr!(StringPtr, CowStr<'a>);
 tagged_ptr!(NamePtr, Name<'a>);
 tagged_ptr!(LevelPtr, Level<'a>);
-tagged_ptr!(ExprPtr, Expr<'a>);
 tagged_ptr!(BigUintPtr, BigUint);
 
-#[cfg(not(feature = "top-byte-ignore"))]
-const _: () = assert!(std::mem::align_of::<Expr<'static>>() >= 2);
+const EXPR_ADDR_MASK: u64 = 0x0000_ffff_ffff_fff8;
+const EXPR_LOCAL_BIT: u64 = 1;
+const EXPR_FVAR_BIT: u64 = 2;
+const EXPR_BVAR_SHIFT: u32 = 48;
+
+pub struct ExprPtr<'a> {
+    bits: u64,
+    _ph: PhantomData<&'a Expr<'a>>,
+}
+
+impl<'a> Clone for ExprPtr<'a> {
+    #[inline]
+    fn clone(&self) -> Self { *self }
+}
+impl<'a> Copy for ExprPtr<'a> {}
+unsafe impl<'a> Send for ExprPtr<'a> {}
+unsafe impl<'a> Sync for ExprPtr<'a> {}
+
+impl<'a> ExprPtr<'a> {
+    #[inline]
+    fn pack(r: &'a Expr<'a>, tag: u64) -> Self {
+        let addr = r as *const Expr<'a> as usize as u64;
+        debug_assert!(addr & !EXPR_ADDR_MASK == 0);
+        let derived = (u64::from(r.num_loose_bvars()) << EXPR_BVAR_SHIFT)
+            | if r.has_fvars() { EXPR_FVAR_BIT } else { 0 };
+        Self { bits: addr | tag | derived, _ph: PhantomData }
+    }
+
+    #[inline]
+    pub(crate) fn global(r: &'a Expr<'a>) -> Self { Self::pack(r, 0) }
+
+    #[inline]
+    pub(crate) fn local(r: &'a Expr<'a>) -> Self { Self::pack(r, EXPR_LOCAL_BIT) }
+
+    #[inline]
+    pub(crate) fn is_local(self) -> bool { self.bits & EXPR_LOCAL_BIT != 0 }
+
+    #[inline]
+    pub(crate) fn num_loose_bvars(self) -> u16 { (self.bits >> EXPR_BVAR_SHIFT) as u16 }
+
+    #[inline]
+    pub(crate) fn has_fvars(self) -> bool { self.bits & EXPR_FVAR_BIT != 0 }
+
+    #[inline]
+    pub(crate) fn as_ref(self) -> &'a Expr<'a> {
+        unsafe { &*((self.bits & EXPR_ADDR_MASK) as usize as *const Expr<'a>) }
+    }
+
+    #[inline]
+    pub(crate) fn get_hash(&self) -> u64 { self.bits }
+}
+
+impl<'a> std::ops::Deref for ExprPtr<'a> {
+    type Target = Expr<'a>;
+    #[inline]
+    fn deref(&self) -> &Expr<'a> { self.as_ref() }
+}
+
+impl<'a> PartialEq for ExprPtr<'a> {
+    #[inline]
+    fn eq(&self, o: &Self) -> bool { self.bits == o.bits }
+}
+impl<'a> Eq for ExprPtr<'a> {}
+
+impl<'a> std::hash::Hash for ExprPtr<'a> {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.bits) }
+}
+
+impl<'a> std::fmt::Debug for ExprPtr<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExprPtr({:p}{})", self.as_ref(), if self.is_local() { ",L" } else { "" })
+    }
+}
+
+const _: () = assert!(std::mem::align_of::<Expr<'static>>() >= 8);
 #[cfg(not(feature = "top-byte-ignore"))]
 const _: () = assert!(std::mem::align_of::<Name<'static>>() >= 2);
 #[cfg(not(feature = "top-byte-ignore"))]
@@ -222,12 +304,14 @@ macro_rules! interner {
         impl<'a> $name<'a> {
             fn new() -> Self { Self { table: HashTable::new() } }
             #[allow(dead_code)]
+            fn with_capacity(cap: usize) -> Self { Self { table: HashTable::with_capacity(cap) } }
+            #[allow(dead_code)]
             pub(crate) fn len(&self) -> usize { self.table.len() }
 
             pub(crate) fn get<'b>(&self, v: &$pointee<'b>) -> Option<&'a $pointee<'a>>
             where
                 'a: 'b, {
-                let hash = v.struct_hash();
+                let hash = v.raw_hash();
                 self.table
                     .find(hash, |stored| {
                         let s: &$pointee<'b> = stored;
@@ -237,9 +321,9 @@ macro_rules! interner {
             }
 
             pub(crate) fn insert(&mut self, arena: &ArenaRef<'a>, v: $pointee<'a>) -> &'a $pointee<'a> {
-                let hash = v.struct_hash();
+                let hash = v.raw_hash();
                 let r: &'a $pointee<'a> = arena.alloc(v);
-                self.table.insert_unique(hash, r, |s| s.struct_hash());
+                self.table.insert_unique(hash, r, |s| s.raw_hash());
                 r
             }
 
@@ -258,6 +342,50 @@ interner!(NameInterner, Name);
 interner!(LevelInterner, Level);
 interner!(ExprInterner, Expr);
 interner!(StringInterner, CowStr);
+
+impl<'a> ExprInterner<'a> {
+    pub(crate) fn build_unique(&mut self, entries: &mut Vec<(u64, &'a Expr<'a>)>) {
+        assert!(self.table.is_empty());
+        if entries.is_empty() {
+            return
+        }
+        self.table.reserve(entries.len(), |s| s.raw_hash());
+        let buckets =
+            if entries.len() < 8 { 8usize } else { (entries.len() * 8).div_ceil(7).next_power_of_two() };
+        let bits = buckets.trailing_zeros();
+        let mut scratch = entries.clone();
+        let mut src: &mut Vec<(u64, &'a Expr<'a>)> = entries;
+        let mut dst: &mut Vec<(u64, &'a Expr<'a>)> = &mut scratch;
+        let mut shift = 0u32;
+        while shift < bits {
+            let mut counts = [0usize; 256];
+            for e in src.iter() {
+                counts[((e.0 >> shift) & 0xff) as usize] += 1;
+            }
+            let mut sum = 0usize;
+            for c in counts.iter_mut() {
+                let t = *c;
+                *c = sum;
+                sum += t;
+            }
+            for e in src.iter() {
+                let d = ((e.0 >> shift) & 0xff) as usize;
+                dst[counts[d]] = *e;
+                counts[d] += 1;
+            }
+            std::mem::swap(&mut src, &mut dst);
+            shift += 8;
+        }
+        for &(hash, r) in src.iter() {
+            match self.table.entry(hash, |s| **s == *r, |s| s.raw_hash()) {
+                hashbrown::hash_table::Entry::Occupied(_) => panic!("Attempted to insert duplicate Expr"),
+                hashbrown::hash_table::Entry::Vacant(v) => {
+                    v.insert(r);
+                }
+            }
+        }
+    }
+}
 
 pub(crate) struct BigUintInterner<'a> {
     table: HashTable<&'a BigUint>,
@@ -287,6 +415,7 @@ pub(crate) struct LevelsInterner<'a> {
 }
 impl<'a> LevelsInterner<'a> {
     fn new() -> Self { Self { table: HashTable::new() } }
+    fn with_capacity(cap: usize) -> Self { Self { table: HashTable::with_capacity(cap) } }
     pub(crate) fn get<'b>(&self, v: &[LevelPtr<'b>]) -> Option<&'a [LevelPtr<'a>]>
     where
         'a: 'b, {
@@ -329,6 +458,17 @@ impl<'a> Dag<'a> {
             bignums: if config.nat_extension { Some(BigUintInterner::new()) } else { None },
         }
     }
+
+    pub(crate) fn new_local(config: &Config) -> Self {
+        Self {
+            names: NameInterner::new(),
+            levels: LevelInterner::with_capacity(14),
+            exprs: ExprInterner::with_capacity(14),
+            uparams: LevelsInterner::with_capacity(14),
+            strings: StringInterner::new(),
+            bignums: if config.nat_extension { Some(BigUintInterner::new()) } else { None },
+        }
+    }
 }
 
 fn is_expr_local_only(e: &Expr<'_>) -> bool {
@@ -357,9 +497,20 @@ pub(crate) fn new_fx_index_map<K, V>() -> FxIndexMap<K, V> { FxIndexMap::with_ha
 
 pub(crate) fn new_fx_hash_map<K, V>() -> FxHashMap<K, V> { FxHashMap::with_hasher(Default::default()) }
 
+pub(crate) fn small_fx_hash_map<K, V>() -> FxHashMap<K, V> {
+    FxHashMap::with_capacity_and_hasher(14, Default::default())
+}
+
+pub(crate) fn small_fx_hash_set<K>() -> FxHashSet<K> {
+    FxHashSet::with_capacity_and_hasher(14, Default::default())
+}
+
+pub(crate) fn small_unique_hash_map<K, V>() -> UniqueHashMap<K, V> {
+    UniqueHashMap::with_capacity_and_hasher(14, Default::default())
+}
+
 pub(crate) fn new_fx_hash_set<K>() -> FxHashSet<K> { FxHashSet::with_hasher(Default::default()) }
 
-pub(crate) fn new_unique_hash_map<K, V>() -> UniqueHashMap<K, V> { UniqueHashMap::with_hasher(Default::default()) }
 
 #[macro_export]
 macro_rules! hash64 {
@@ -434,12 +585,12 @@ pub struct ExprCache<'t> {
 impl<'t> ExprCache<'t> {
     fn new() -> Self {
         Self {
-            inst_cache: new_fx_hash_map(),
-            abstr_cache: new_fx_hash_map(),
-            subst_cache: new_fx_hash_map(),
-            dsubst_cache: new_fx_hash_map(),
-            abstr_cache_levels: new_fx_hash_map(),
-            simplify_cache: new_fx_hash_map(),
+            inst_cache: small_fx_hash_map(),
+            abstr_cache: small_fx_hash_map(),
+            subst_cache: small_fx_hash_map(),
+            dsubst_cache: small_fx_hash_map(),
+            abstr_cache_levels: small_fx_hash_map(),
+            simplify_cache: small_fx_hash_map(),
         }
     }
 }
@@ -514,7 +665,7 @@ pub struct TcCtx<'t, 'p> {
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn new(export_file: &'t ExportFile<'p>, arena: &'t ArenaRef<'t>) -> Self {
-        let dag = Dag::new(&export_file.config);
+        let dag = Dag::new_local(&export_file.config);
         Self { export_file, arena, dag, dbj_level_counter: 0u16, unique_counter: 0u32, expr_cache: ExprCache::new() }
     }
 
@@ -973,37 +1124,37 @@ pub(crate) struct TcCache<'a, 't> {
 impl<'a, 't> TcCache<'a, 't> {
     pub(crate) fn new() -> Self {
         Self {
-            infer_cache_check: new_unique_hash_map(),
-            infer_cache_no_check: new_unique_hash_map(),
-            whnf_cache: new_unique_hash_map(),
-            whnf_no_unfolding_cache: new_unique_hash_map(),
+            infer_cache_check: small_unique_hash_map(),
+            infer_cache_no_check: small_unique_hash_map(),
+            whnf_cache: small_unique_hash_map(),
+            whnf_no_unfolding_cache: small_unique_hash_map(),
             eq_cache: UnionFind::new(),
-            strong_cache: new_unique_hash_map(),
-            unfold_const_cache: new_fx_hash_map(),
-            rec_rule_cache: new_fx_hash_map(),
-            const_head_type_cache: new_fx_hash_map(),
-            const_head_value_cache: new_fx_hash_map(),
-            const_result_level_cache: new_fx_hash_map(),
-            conv_cache: new_fx_hash_set(),
-            conv_cache_neg: new_fx_hash_set(),
-            conv_cache_neg_probe: new_fx_hash_set(),
+            strong_cache: small_unique_hash_map(),
+            unfold_const_cache: small_fx_hash_map(),
+            rec_rule_cache: small_fx_hash_map(),
+            const_head_type_cache: small_fx_hash_map(),
+            const_head_value_cache: small_fx_hash_map(),
+            const_result_level_cache: small_fx_hash_map(),
+            conv_cache: small_fx_hash_set(),
+            conv_cache_neg: small_fx_hash_set(),
+            conv_cache_neg_probe: small_fx_hash_set(),
             probe_depth: 0,
-            closed_eval_cache: new_fx_hash_map(),
-            open_eval_cache: new_fx_hash_map(),
-            open_eval_seen: new_fx_hash_set(),
-            bvar_hc: new_fx_hash_map(),
-            env_hc: new_fx_hash_map(),
-            spine_hc: new_fx_hash_map(),
-            lam_hc: new_fx_hash_map(),
-            pi_hc: new_fx_hash_map(),
-            rigid_hc: new_fx_hash_map(),
-            unfold_hc: new_fx_hash_map(),
-            iota_stuck: new_fx_hash_set(),
-            struct_eta_cache: new_fx_hash_map(),
-            iota_cache: new_fx_hash_map(),
-            canon_cache: new_fx_hash_map(),
-            content_hc: new_fx_hash_map(),
-            fvar_cache: new_fx_hash_map(),
+            closed_eval_cache: small_fx_hash_map(),
+            open_eval_cache: small_fx_hash_map(),
+            open_eval_seen: small_fx_hash_set(),
+            bvar_hc: small_fx_hash_map(),
+            env_hc: small_fx_hash_map(),
+            spine_hc: small_fx_hash_map(),
+            lam_hc: small_fx_hash_map(),
+            pi_hc: small_fx_hash_map(),
+            rigid_hc: small_fx_hash_map(),
+            unfold_hc: small_fx_hash_map(),
+            iota_stuck: small_fx_hash_set(),
+            struct_eta_cache: small_fx_hash_map(),
+            iota_cache: small_fx_hash_map(),
+            canon_cache: small_fx_hash_map(),
+            content_hc: small_fx_hash_map(),
+            fvar_cache: small_fx_hash_map(),
         }
     }
 

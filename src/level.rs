@@ -30,6 +30,11 @@ impl<'a> std::hash::Hash for Level<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
 }
 
+impl<'a> crate::util::RawHash for Level<'a> {
+    #[inline]
+    fn raw_hash(&self) -> u64 { self.get_hash() }
+}
+
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn level_succs(&self, mut l: LevelPtr<'t>) -> (LevelPtr<'t>, usize) {
         let mut num_succs = 0usize;

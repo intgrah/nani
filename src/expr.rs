@@ -131,6 +131,11 @@ impl<'a> std::hash::Hash for Expr<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
 }
 
+impl<'a> crate::util::RawHash for Expr<'a> {
+    #[inline]
+    fn raw_hash(&self) -> u64 { self.get_hash() }
+}
+
 /// The style of this binder (in Lean's vernacular, the brackets used to write it).
 /// `(_ : _)` for default, `{_ : _}` for implicit, `{{_ : _}}` for strict implicit,
 /// and `[_ : _]` for instance implicit.
@@ -712,9 +717,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     
     /// The number of "loose" bound variables, which is the number of bound variables
     /// in an expression which are boudn by something above it.
-    pub(crate) fn num_loose_bvars(&self, e: ExprPtr<'t>) -> u16 { self.read_expr(e).num_loose_bvars() }
+    pub(crate) fn num_loose_bvars(&self, e: ExprPtr<'t>) -> u16 { e.num_loose_bvars() }
 
-    pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
+    pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { e.has_fvars() }
 }
 
 impl<'t> Expr<'t> {

@@ -17,6 +17,11 @@ impl<'a> std::hash::Hash for Name<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
 }
 
+impl<'a> crate::util::RawHash for Name<'a> {
+    #[inline]
+    fn raw_hash(&self) -> u64 { self.get_hash() }
+}
+
 impl<'a> Name<'a> {
     fn get_hash(&self) -> u64 {
         match self {
