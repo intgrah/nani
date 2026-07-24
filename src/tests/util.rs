@@ -134,6 +134,18 @@ fn check_k_reduce_depth_alias() {
 }
 
 #[test]
+fn check_proof_irrel_under_bvar() -> Result<(), Box<dyn Error>> {
+    test_export_file(
+        Some(Path::new("test_resources/ProofIrrelUnderBVar/config.json")),
+        |export| {
+            for declar in export.declars.values() {
+                export.check_declar(declar);
+            }
+        },
+    )
+}
+
+#[test]
 #[should_panic(expected = "infer_proj prop")]
 fn check_proj_from_prop() {
     test_export_file_should_panic(
