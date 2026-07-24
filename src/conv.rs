@@ -61,30 +61,13 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     #[inline]
-    fn unify<const RIGID: bool>(&mut self, depth: u32, mut x: V<'t>, mut y: V<'t>) -> bool {
-        loop {
-            x = self.force_thunk(depth, x);
-            y = self.force_thunk(depth, y);
-            if std::ptr::eq(x, y) {
-                return true;
-            }
-            match (x, y) {
-                (
-                    Value::Rigid { head: RigidHead::BVar(la, _), spine: sx },
-                    Value::Rigid { head: RigidHead::BVar(lb, _), spine: sy },
-                ) if la == lb => match (*sx, *sy) {
-                    (
-                        Spine::Snoc(Spine::Empty, Elim::App(va)),
-                        Spine::Snoc(Spine::Empty, Elim::App(vb)),
-                    ) => {
-                        x = va;
-                        y = vb;
-                    }
-                    _ => return self.unify_general::<RIGID>(depth, x, y),
-                },
-                _ => return self.unify_general::<RIGID>(depth, x, y),
-            }
+    fn unify<const RIGID: bool>(&mut self, depth: u32, x: V<'t>, y: V<'t>) -> bool {
+        let x = self.force_thunk(depth, x);
+        let y = self.force_thunk(depth, y);
+        if std::ptr::eq(x, y) {
+            return true;
         }
+        self.unify_general::<RIGID>(depth, x, y)
     }
 
     #[inline]
