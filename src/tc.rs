@@ -238,7 +238,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // `c_name = Point`
         let (_f, c_name, c_levels, args) = self.ctx.unfold_const_apps(e_type)?;
         // `Point` declaration
-        let InductiveData { all_ctor_names, .. } = self.env.get_inductive(&c_name)?;
+        let InductiveData { all_ctor_names, .. } = self.env.get_structure(&c_name, false)?;
         // Name = `Point.mk`
         let ctor_name0 = all_ctor_names.get(0).copied()?;
         // Ctor data for `Point.mk`
@@ -402,7 +402,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let (_, struct_ty_name, struct_ty_levels, struct_ty_args) = self.ctx.unfold_const_apps(structure_ty).unwrap();
 
         let InductiveData { info: inductive_info, all_ctor_names, num_params, .. } =
-            self.env.get_inductive(&struct_ty_name).unwrap();
+            self.env.get_structure(&struct_ty_name, true).unwrap();
 
         let ConstructorData { info: ctor_info, .. } = self.env.get_constructor(&all_ctor_names[0]).unwrap();
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);

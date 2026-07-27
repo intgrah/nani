@@ -786,7 +786,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         if ind_name != ty_name {
             return None;
         }
-        let ind = self.env.get_inductive(&ind_name)?;
+        let ind = self.env.get_structure(&ind_name, true)?;
         let ctor_name = ind.all_ctor_names[0];
         let ctor_info = match self.env.get_declar(&ctor_name)? {
             Declar::Constructor(c) => c.info,

@@ -511,13 +511,10 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn is_unit_inductive(&self, ind_name: NamePtr<'t>) -> bool {
-        let ind = match self.env.get_inductive(&ind_name) {
+        let ind = match self.env.get_structure(&ind_name, false) {
             Some(i) => i,
             None => return false,
         };
-        if ind.all_ctor_names.len() != 1 || ind.num_indices != 0 {
-            return false;
-        }
         let ctor = match self.env.get_constructor(&ind.all_ctor_names[0]) {
             Some(c) => c,
             None => return false,
