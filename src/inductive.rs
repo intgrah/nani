@@ -8,17 +8,25 @@ use std::sync::Arc;
 type Bndr<'a> = (NamePtr<'a>, BinderStyle, ExprPtr<'a>);
 
 impl<'t, 'p: 't> ExportFile<'p> {
-    pub(crate) fn check_inductive_declar(&self, d: &Declar<'t>) {
+    pub(crate) fn check_inductive_declar(
+        &'t self,
+        ctx: &mut TcCtx<'t, 'p>,
+        cache: &mut crate::util::TcCache<'t, 't>,
+        arena: &'t bumpalo::Bump,
+        d: &Declar<'t>,
+    ) {
         let (ind, env_limit) = match d {
             Declar::Inductive(ind) => {
-                let is_recursive = self.with_ctx(|ctx, _cache, _| {
-                    for ctor_name in ind.all_ctor_names.iter() {
+                let is_recursive = {
+                    let mut found = false;
+                    'outer: for ctor_name in ind.all_ctor_names.iter() {
                         match self.declars.get(ctor_name).unwrap() {
                             Declar::Constructor(ctor_data @ ConstructorData { .. }) => {
                                 let mut ctor_ty = ctor_data.info.ty;
                                 while let Pi { binder_type, body, .. } = ctx.read_expr(ctor_ty) {
                                     if ctx.find_const(binder_type, |n| ind.all_ind_names.iter().any(|nn| n == *nn)) {
-                                        return true
+                                        found = true;
+                                        break 'outer
                                     }
                                     ctor_ty = body;
                                 }
@@ -26,15 +34,15 @@ impl<'t, 'p: 't> ExportFile<'p> {
                             _ => panic!(),
                         }
                     }
-                    false
-                });
+                    found
+                };
                 assert_eq!(ind.is_recursive, is_recursive);
                 let (start, size) = self.mutual_block_sizes.get(&ind.info.name).unwrap();
                 (ind, crate::env::EnvLimit::ByIndex(start + size))
             }
             _ => panic!("expected inductive")
         };
-        self.with_ctx(|ctx, cache, arena| {
+        {
             // The **unmodified** types and constructors for all of the types in this mutual block.
             let unmodified_tys_ctors = ctx.with_tc(env_limit, arena, cache, |tc| {
                 tc.check_declar_info_v(d);
@@ -94,7 +102,7 @@ impl<'t, 'p: 't> ExportFile<'p> {
                     tc.assert_nonnested_recursors_def_eq(&st, &recursors);
                 }
             })
-        })
+        }
     }
 }
 

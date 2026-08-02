@@ -68,11 +68,21 @@ pub struct TypeChecker<'x, 't, 'p> {
 impl<'p> ExportFile<'p> {
     /// The entry point for checking a declaration `d`.
     pub fn check_declar(&self, d: &Declar<'p>) {
+        self.with_ctx(|ctx, cache, bump| self.check_declar_with(ctx, cache, bump, d))
+    }
+
+    fn check_declar_with<'t>(
+        &'t self,
+        ctx: &mut TcCtx<'t, 'p>,
+        cache: &mut TcCache<'t, 't>,
+        bump: &'t bumpalo::Bump,
+        d: &Declar<'t>,
+    ) {
         use Declar::*;
         match d {
-            Inductive(..) => self.check_inductive_declar(d),
-            Quot { .. } => self.with_ctx(|ctx, cache, arena| crate::quot::check_quot(ctx, cache, arena, d)),
-            _ => self.with_ctx(|ctx, cache, bump| self.check_simple_declar(ctx, cache, bump, d)),
+            Inductive(..) => self.check_inductive_declar(ctx, cache, bump, d),
+            Quot { .. } => crate::quot::check_quot(ctx, cache, bump, d),
+            _ => self.check_simple_declar(ctx, cache, bump, d),
         }
     }
 
@@ -104,28 +114,26 @@ impl<'p> ExportFile<'p> {
     fn run_session<F>(&self, first: (usize, usize), mut next_chunk: F)
     where
         F: FnMut() -> Option<(usize, usize)>, {
+        let base = bumpalo::Bump::new();
+        let mut session_cache = crate::util::SessionCache::new(&base);
         let mut pending = Some(first);
         loop {
             let mut arena = stumpalo::Arena::new();
             let finished = arena.with_scope(|scope| {
                 let bump = bumpalo::Bump::new();
                 let mut ctx = TcCtx::new(self, scope);
-                let mut cache = TcCache::new(&bump);
-                loop {
+                session_cache.enter(|cache| loop {
                     let Some((mut i, end)) = pending.take().or_else(&mut next_chunk) else { return true };
                     while i < end {
                         let (_, d) = self.declars.get_index(i).expect("declaration index out of range");
                         i += 1;
-                        match d {
-                            Declar::Inductive(..) | Declar::Quot { .. } => self.check_declar(d),
-                            _ => self.check_simple_declar(&mut ctx, &mut cache, &bump, d),
-                        }
+                        self.check_declar_with(&mut ctx, cache, &bump, d);
                         if bump.allocated_bytes() > SESSION_BUDGET {
                             pending = Some((i, end));
                             return false
                         }
                     }
-                }
+                })
             });
             if finished {
                 return

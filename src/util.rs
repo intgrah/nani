@@ -1173,6 +1173,80 @@ impl<'a, 't> TcCache<'a, 't> {
         self.ind_occ_cache.clear();
         self.closed_eval_cache.clear();
     }
+
+    pub(crate) fn clear_session(&mut self) {
+        self.probe_depth = 0;
+        shrink_map(&mut self.unfold_const_cache);
+        shrink_map(&mut self.rec_rule_cache);
+        shrink_map(&mut self.const_head_type_cache);
+        shrink_map(&mut self.const_head_value_cache);
+        shrink_map(&mut self.const_result_level_cache);
+        shrink_set(&mut self.conv_cache);
+        shrink_set(&mut self.conv_cache_neg);
+        shrink_set(&mut self.conv_cache_neg_probe);
+        if self.frames.capacity() > KEEP_CAP {
+            self.frames = hashbrown::HashTable::new();
+        } else {
+            self.frames.clear();
+        }
+        shrink_map(&mut self.lsub_bases);
+        shrink_map(&mut self.level_subs);
+        self.prune_dm.fill((0, 0, None));
+        shrink_map(&mut self.type_cache);
+        shrink_map(&mut self.thunk_hc);
+        shrink_map(&mut self.quote_cache);
+        shrink_map(&mut self.open_eval_cache);
+        shrink_set(&mut self.open_eval_seen);
+        shrink_map(&mut self.bvar_hc);
+        shrink_map(&mut self.spine_hc);
+        shrink_map(&mut self.lam_hc);
+        shrink_map(&mut self.pi_hc);
+        shrink_map(&mut self.rigid_hc);
+        shrink_map(&mut self.unfold_hc);
+        shrink_set(&mut self.iota_stuck);
+        shrink_map(&mut self.struct_eta_cache);
+        shrink_map(&mut self.iota_cache);
+        shrink_map(&mut self.canon_cache);
+        shrink_map(&mut self.content_hc);
+        shrink_map(&mut self.fvar_cache);
+        shrink_map(&mut self.ind_occ_cache);
+        shrink_map(&mut self.closed_eval_cache);
+    }
+}
+
+pub(crate) const KEEP_CAP: usize = 1 << 15;
+
+fn shrink_map<K, V>(m: &mut FxHashMap<K, V>) {
+    if m.capacity() > KEEP_CAP {
+        *m = FxHashMap::default();
+    } else {
+        m.clear();
+    }
+}
+
+fn shrink_set<K>(s: &mut FxHashSet<K>) {
+    if s.capacity() > KEEP_CAP {
+        *s = FxHashSet::default();
+    } else {
+        s.clear();
+    }
+}
+
+pub(crate) struct SessionCache<'b> {
+    inner: TcCache<'b, 'b>,
+}
+
+impl<'b> SessionCache<'b> {
+    pub(crate) fn new(base: &'b bumpalo::Bump) -> Self { Self { inner: TcCache::new(base) } }
+
+    pub(crate) fn enter<'a, R>(&mut self, f: impl FnOnce(&mut TcCache<'a, 'a>) -> R) -> R
+    where
+        'b: 'a, {
+        let p: *mut TcCache<'b, 'b> = &mut self.inner;
+        let r = f(unsafe { &mut *(p as *mut TcCache<'a, 'a>) });
+        self.inner.clear_session();
+        r
+    }
 }
 
 

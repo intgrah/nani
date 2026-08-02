@@ -48,7 +48,7 @@ pub fn check_eq<'x, 't: 'x, 'p: 't>(
     ctx: &'x mut TcCtx<'t, 'p>,
     cache: &mut crate::util::TcCache<'t, 't>,
     arena: &'t bumpalo::Bump,
-    declar: &Declar<'p>,
+    declar: &Declar<'t>,
 ) {
     use crate::expr::BinderStyle::*;
     let name = ctx.str1("Eq");
@@ -113,7 +113,7 @@ pub fn check_quot<'x, 't: 'x, 'p: 't>(
     ctx: &'x mut TcCtx<'t, 'p>,
     cache: &mut crate::util::TcCache<'t, 't>,
     arena: &'t bumpalo::Bump,
-    declar: &Declar<'p>,
+    declar: &Declar<'t>,
 ) {
     // `Eq` matching expectations is a prerequisite for checking `Quot`.
     let prop = ctx.prop();
