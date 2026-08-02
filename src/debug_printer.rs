@@ -128,7 +128,7 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
                 write!(f, "{:?}.{:?}", self.ctx.debug_print(name), self.ctx.debug_print(levels.as_ref()))
             }
             App { fun, arg, .. } => write!(f, "({:?} {:?})", self.ctx.debug_print(fun), self.ctx.debug_print(arg)),
-            Let { binder_name, val, binder_type: binder, body, .. } => {
+            Let { data: &crate::expr::LetData { binder_name, val, binder_type: binder, body, .. }, .. } => {
                 write!(
                     f,
                     "let {:?} : {:?} := {:?} in {:?}",
@@ -154,15 +154,6 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
                     self.ctx.debug_print(binder_name),
                     self.ctx.debug_print(binder_type),
                     self.ctx.debug_print(body)
-                )
-            }
-            Local { binder_name, binder_type, id, .. } => {
-                write!(
-                    f,
-                    "#({:?}, {:?} : {:?})",
-                    self.ctx.debug_print(binder_name),
-                    id,
-                    self.ctx.debug_print(binder_type)
                 )
             }
             Proj { idx, structure, .. } => {

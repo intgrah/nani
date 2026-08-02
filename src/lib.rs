@@ -11,17 +11,20 @@ pub mod env;
 pub mod eval;
 pub mod expr;
 pub mod inductive;
+pub mod infer;
 pub mod level;
 pub mod name;
 pub mod parser;
 pub mod pretty_printer;
 pub mod quot;
+pub mod quote;
 pub mod tc;
 #[cfg(test)]
 mod tests;
-pub mod union_find;
-pub mod unique_hasher;
 pub mod util;
 pub mod value;
 
 pub(crate) const STACK_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
+
+

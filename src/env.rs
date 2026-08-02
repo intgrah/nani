@@ -254,7 +254,10 @@ impl<'x, 'a: 'x> Env<'x, 'a> {
             EnvLimit::Empty => 0,
             EnvLimit::ByIndex(idx) => idx,
             EnvLimit::PpUnlimited => declars.len(),
-            EnvLimit::ByName(n) => declars.get_index_of(&n).unwrap_or(0),
+            EnvLimit::ByName(n) => match n.as_ref().decl_idx() {
+                crate::name::NO_DECL => 0,
+                idx => idx as usize,
+            },
         };
         Self { declars, cutoff, temp_declars, notation }
     }
@@ -272,10 +275,10 @@ impl<'x, 'a: 'x> Env<'x, 'a> {
 
     /// Get a declaration, bypassing the temporary extension, only searching in
     /// the persistent set of declarations.
-    pub fn get_old_declar(&self, n: &NamePtr<'a>) -> Option<&Declar<'a>> { 
-        let (idx, _, v) = self.declars.get_full(n)?;
+    pub fn get_old_declar(&self, n: &NamePtr<'a>) -> Option<&Declar<'a>> {
+        let idx = n.as_ref().decl_idx() as usize;
         if idx < self.cutoff {
-            Some(v)
+            Some(&self.declars[idx])
         } else {
             None
         }
