@@ -583,6 +583,13 @@ pub struct ExprCache<'t> {
 }
 
 impl<'t> ExprCache<'t> {
+    pub(crate) fn shrink(&mut self) {
+        shrink_map(&mut self.inst_cache);
+        shrink_map(&mut self.subst_cache);
+        shrink_map(&mut self.dsubst_cache);
+        shrink_map(&mut self.simplify_cache);
+    }
+
     fn new() -> Self {
         Self {
             inst_cache: small_fx_hash_map(),
@@ -1232,6 +1239,20 @@ fn shrink_set<K>(s: &mut FxHashSet<K>) {
     }
 }
 
+pub(crate) struct SessionBump {
+    inner: bumpalo::Bump,
+}
+
+impl SessionBump {
+    pub(crate) fn new() -> Self { Self { inner: bumpalo::Bump::new() } }
+
+    pub(crate) fn allocated_bytes(&self) -> usize { self.inner.allocated_bytes() }
+
+    pub(crate) fn get<'a>(&self) -> &'a bumpalo::Bump { unsafe { &*(&self.inner as *const bumpalo::Bump) } }
+
+    pub(crate) fn reset(&mut self) { self.inner = bumpalo::Bump::new() }
+}
+
 pub(crate) struct SessionCache<'b> {
     inner: TcCache<'b, 'b>,
 }
@@ -1239,9 +1260,7 @@ pub(crate) struct SessionCache<'b> {
 impl<'b> SessionCache<'b> {
     pub(crate) fn new(base: &'b bumpalo::Bump) -> Self { Self { inner: TcCache::new(base) } }
 
-    pub(crate) fn enter<'a, R>(&mut self, f: impl FnOnce(&mut TcCache<'a, 'a>) -> R) -> R
-    where
-        'b: 'a, {
+    pub(crate) fn enter<'a, R>(&mut self, f: impl FnOnce(&mut TcCache<'a, 'a>) -> R) -> R {
         let p: *mut TcCache<'b, 'b> = &mut self.inner;
         let r = f(unsafe { &mut *(p as *mut TcCache<'a, 'a>) });
         self.inner.clear_session();

@@ -114,27 +114,35 @@ impl<'p> ExportFile<'p> {
     fn run_session<F>(&self, first: (usize, usize), mut next_chunk: F)
     where
         F: FnMut() -> Option<(usize, usize)>, {
+        let mut thread_arena = stumpalo::Arena::new();
+        thread_arena.with_scope(|tscope| {
+            let mut tctx = TcCtx::new(self, tscope);
+            self.run_session_inner(first, &mut next_chunk, &mut tctx)
+        })
+    }
+
+    fn run_session_inner<'h, F>(&'h self, first: (usize, usize), next_chunk: &mut F, tctx: &mut TcCtx<'h, 'p>)
+    where
+        F: FnMut() -> Option<(usize, usize)>, {
         let base = bumpalo::Bump::new();
         let mut session_cache = crate::util::SessionCache::new(&base);
+        let mut sbump = crate::util::SessionBump::new();
         let mut pending = Some(first);
         loop {
-            let mut arena = stumpalo::Arena::new();
-            let finished = arena.with_scope(|scope| {
-                let bump = bumpalo::Bump::new();
-                let mut ctx = TcCtx::new(self, scope);
-                session_cache.enter(|cache| loop {
-                    let Some((mut i, end)) = pending.take().or_else(&mut next_chunk) else { return true };
-                    while i < end {
-                        let (_, d) = self.declars.get_index(i).expect("declaration index out of range");
-                        i += 1;
-                        self.check_declar_with(&mut ctx, cache, &bump, d);
-                        if bump.allocated_bytes() > SESSION_BUDGET {
-                            pending = Some((i, end));
-                            return false
-                        }
+            let finished = session_cache.enter(|cache| loop {
+                let Some((mut i, end)) = pending.take().or_else(&mut *next_chunk) else { return true };
+                while i < end {
+                    let (_, d) = self.declars.get_index(i).expect("declaration index out of range");
+                    i += 1;
+                    self.check_declar_with(tctx, cache, sbump.get(), d);
+                    if sbump.allocated_bytes() > SESSION_BUDGET {
+                        pending = Some((i, end));
+                        return false
                     }
-                })
+                }
             });
+            sbump.reset();
+            tctx.expr_cache.shrink();
             if finished {
                 return
             }
