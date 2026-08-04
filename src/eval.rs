@@ -10,6 +10,30 @@ use num_bigint::BigUint;
 use num_traits::pow::Pow;
 use std::cell::OnceCell;
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi2")]
+unsafe fn pext(a: u64, m: u64) -> u64 { std::arch::x86_64::_pext_u64(a, m) }
+
+#[inline]
+fn select_ranks(sub: u64, sup: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("bmi2") {
+        return unsafe { pext(sub, sup) };
+    }
+    let mut out = 0u64;
+    let mut f = sup;
+    let mut rank = 0u32;
+    while f != 0 {
+        let j = f.trailing_zeros();
+        f &= f - 1;
+        if (sub >> j) & 1 != 0 {
+            out |= 1u64 << rank;
+        }
+        rank += 1;
+    }
+    out
+}
+
 #[inline]
 fn rigid_head_key<'a>(head: &RigidHead<'a>) -> (u8, u64, u64) {
     match *head {
@@ -197,19 +221,20 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             match cur {
                 value::Env::Nil { .. } => break,
                 value::Env::Framed { mask: fmask, slots, .. } => {
-                    while rem != 0 {
-                        let j = rem.trailing_zeros();
-                        rem &= rem - 1;
-                        if j < 64 - consumed && (fmask >> j) & 1 != 0 {
-                            let below = fmask & ((1u64 << j) - 1);
-                            let sv = slots[below.count_ones() as usize];
-                            buf[n].write(sv);
-                            slots_hash = slots_hash
-                                .wrapping_mul(0x9E3779B97F4A7C15)
-                                .wrapping_add(sv as *const Value<'t> as usize as u64);
-                            out_mask |= 1u64 << (consumed + j);
-                            n += 1;
-                        }
+                    let limit = 64 - consumed;
+                    let bound = if limit >= 64 { u64::MAX } else { (1u64 << limit) - 1 };
+                    let m2 = rem & *fmask & bound;
+                    out_mask |= m2 << consumed;
+                    let mut sel = select_ranks(m2, *fmask);
+                    while sel != 0 {
+                        let i = sel.trailing_zeros() as usize;
+                        sel &= sel - 1;
+                        let sv = slots[i];
+                        buf[n].write(sv);
+                        slots_hash = slots_hash
+                            .wrapping_mul(0x9E3779B97F4A7C15)
+                            .wrapping_add(sv as *const Value<'t> as usize as u64);
+                        n += 1;
                     }
                     break;
                 }
