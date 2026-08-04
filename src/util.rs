@@ -1084,7 +1084,7 @@ pub struct TcCache<'a, 't> {
     pub(crate) const_head_type_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), V<'a>>,
     pub(crate) const_head_value_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), V<'a>>,
     pub(crate) const_result_level_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), LevelPtr<'t>>,
-    pub(crate) conv_cache: FxHashSet<(usize, usize)>,
+    pub(crate) conv_uf: crate::union_find::UnionFind,
     pub(crate) conv_cache_neg: FxHashSet<(usize, usize)>,
     pub(crate) conv_cache_neg_probe: FxHashSet<(usize, usize)>,
     pub(crate) probe_depth: u32,
@@ -1130,7 +1130,7 @@ impl<'a, 't> TcCache<'a, 't> {
             const_head_type_cache: session_small_fx_hash_map(),
             const_head_value_cache: session_small_fx_hash_map(),
             const_result_level_cache: small_fx_hash_map(),
-            conv_cache: session_small_fx_hash_set(),
+            conv_uf: crate::union_find::UnionFind::new(),
             conv_cache_neg: session_small_fx_hash_set(),
             conv_cache_neg_probe: small_fx_hash_set(),
             probe_depth: 0,
@@ -1175,7 +1175,7 @@ impl<'a, 't> TcCache<'a, 't> {
         self.const_head_type_cache.clear();
         self.const_head_value_cache.clear();
         self.const_result_level_cache.clear();
-        self.conv_cache.clear();
+        self.conv_uf.clear();
         self.conv_cache_neg.clear();
         self.conv_cache_neg_probe.clear();
         self.frames.clear();
@@ -1212,7 +1212,11 @@ impl<'a, 't> TcCache<'a, 't> {
         shrink_map(&mut self.const_head_type_cache);
         shrink_map(&mut self.const_head_value_cache);
         shrink_map(&mut self.const_result_level_cache);
-        shrink_set(&mut self.conv_cache);
+        if self.conv_uf.capacity() > KEEP_CAP {
+            self.conv_uf = crate::union_find::UnionFind::new();
+        } else {
+            self.conv_uf.clear();
+        }
         shrink_set(&mut self.conv_cache_neg);
         shrink_set(&mut self.conv_cache_neg_probe);
         if self.frames.capacity() > KEEP_CAP {

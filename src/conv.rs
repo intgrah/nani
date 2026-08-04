@@ -84,7 +84,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             let xa = x as *const Value<'t> as usize;
             let ya = y as *const Value<'t> as usize;
             let cache_key = if xa < ya { (xa, ya) } else { (ya, xa) };
-            if self.tc_cache.conv_cache.contains(&cache_key) {
+            if self.tc_cache.conv_uf.equiv(xa, ya) {
                 return true;
             }
             if RIGID && neg_eligible {
@@ -97,7 +97,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             }
             let result = self.unify_no_cache::<RIGID>(depth, x, y);
             if result {
-                self.tc_cache.conv_cache.insert(cache_key);
+                self.tc_cache.conv_uf.union(xa, ya);
             } else if RIGID && neg_eligible {
                 if self.tc_cache.probe_depth == 0 {
                     self.tc_cache.conv_cache_neg.insert(cache_key);

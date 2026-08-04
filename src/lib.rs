@@ -21,6 +21,7 @@ pub mod quote;
 pub mod tc;
 #[cfg(test)]
 mod tests;
+pub mod union_find;
 pub mod util;
 pub mod value;
 
