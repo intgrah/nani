@@ -137,7 +137,7 @@ fn check_proof_irrel_under_bvar() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-#[should_panic(expected = "infer_proj prop")]
+#[should_panic(expected = "non-proof field from a Prop structure")]
 fn check_proj_from_prop() {
     test_export_file_should_panic(
         Some(Path::new("test_resources/ProjFromProp/config.json")),
