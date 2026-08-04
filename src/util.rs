@@ -1086,7 +1086,7 @@ pub struct TcCache<'a, 't> {
     pub(crate) level_subs: FxHashMap<(LevelsPtr<'t>, LevelsPtr<'t>), &'a crate::value::LevelSub<'a>>,
     pub(crate) prune_dm: Box<[(usize, u64, Option<E<'a>>); PRUNE_DM_LEN]>,
     pub(crate) rigid_hc: FxHashMap<(u8, u64, u64, usize), V<'a>>,
-    pub(crate) unfold_hc: FxHashMap<(u64, u64, usize, usize), V<'a>>,
+    pub(crate) unfold_hc: FxHashMap<(usize, usize), V<'a>>,
     pub(crate) iota_stuck: FxHashSet<usize>,
     pub(crate) struct_eta_cache: FxHashMap<(usize, NamePtr<'t>), Option<V<'a>>>,
     pub(crate) iota_cache: FxHashMap<usize, V<'a>>,

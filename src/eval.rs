@@ -88,12 +88,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         spine: S<'t>,
         head_value: &'t OnceCell<V<'t>>,
     ) -> V<'t> {
-        let key = (
-            name.get_hash(),
-            levels.get_hash(),
-            spine as *const Spine<'t> as usize,
-            head_value as *const OnceCell<V<'t>> as usize,
-        );
+        let key = (head_value as *const OnceCell<V<'t>> as usize, spine as *const Spine<'t> as usize);
         if let Some(u) = self.tc_cache.unfold_hc.get(&key) {
             return u;
         }
