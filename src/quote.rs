@@ -13,7 +13,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             Value::Sort { level } => self.ctx.mk_sort(*level),
             Value::NatLit { ptr } => self.ctx.mk_nat_lit(*ptr).expect("quote: nat literal without extension"),
             Value::StrLit { ptr } => self.ctx.mk_string_lit(*ptr).expect("quote: string literal without extension"),
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let head = self.quote_rigid_head(depth, *head);
                 self.quote_spine(depth, head, spine)
             }
@@ -30,7 +30,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 let body_e = self.quote(depth + 1, body);
                 self.ctx.mk_lambda(binder_name, binder_style, dom_e, body_e)
             }
-            Value::Pi { binder_name, binder_style, domain, body } => {
+            Value::Pi { binder_name, binder_style, domain, body, .. } => {
                 let (binder_name, binder_style, domain) = (*binder_name, *binder_style, *domain);
                 let fresh = self.mk_bvar_hc(depth, domain);
                 let body = self.apply_closure(depth + 1, body, fresh, Some(domain));
@@ -95,7 +95,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 let f = self.force_thunk(depth, v);
                 self.quote_weak(depth, f)
             }
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let head = self.quote_rigid_head(depth, *head);
                 self.quote_spine_weak(depth, head, spine)
             }

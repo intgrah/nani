@@ -93,6 +93,9 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return u;
         }
         let u = value::mk_unfold(self.arena, name, levels, spine, head_value);
+        if spine.is_canonical() {
+            u.mark_canonical();
+        }
         self.tc_cache.unfold_hc.insert(key, u);
         u
     }
@@ -293,6 +296,14 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return s;
         }
         let s = value::spine_snoc(self.arena, prev, elim);
+        let canon = prev.is_canonical()
+            && match elim.view() {
+                ElimView::App(a) => a.is_canonical(),
+                ElimView::Proj { .. } => true,
+            };
+        if canon {
+            s.mark_canonical();
+        }
         self.tc_cache.spine_hc.insert(key, s);
         s
     }
@@ -305,6 +316,9 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return v;
         }
         let v = value::mk_rigid(self.arena, head, spine);
+        if spine.is_canonical() {
+            v.mark_canonical();
+        }
         self.tc_cache.rigid_hc.insert(key, v);
         v
     }
@@ -323,12 +337,16 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return v;
         }
         let v = value::mk_lam(self.arena, binder_name, binder_style, binder_type, body);
+        v.mark_canonical();
         self.tc_cache.lam_hc.insert(key, v);
         v
     }
 
     #[inline]
     fn canonicalize_for_spine(&mut self, v: V<'t>) -> V<'t> {
+        if v.is_canonical() {
+            return v;
+        }
         if matches!(v, Value::Thunk { .. }) {
             return v;
         }
@@ -337,6 +355,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return c;
         }
         let c = self.canon_compute(v);
+        c.mark_canonical();
         self.tc_cache.canon_cache.insert(key, c);
         c
     }
@@ -370,12 +389,12 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         match v {
             Value::Lam { binder_name, binder_style, binder_type, body, .. } =>
                 self.mk_lam_hc(*binder_name, *binder_style, *binder_type, *body),
-            Value::Pi { binder_name, binder_style, domain, body } =>
+            Value::Pi { binder_name, binder_style, domain, body, .. } =>
                 self.mk_pi_hc(*binder_name, *binder_style, domain, *body),
             Value::Sort { level } => self.canon_content(0, level.get_hash(), v),
             Value::NatLit { ptr } => self.canon_content(1, ptr.get_hash(), v),
             Value::StrLit { ptr } => self.canon_content(2, ptr.get_hash(), v),
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let cspine = self.canon_spine(spine);
                 self.mk_rigid_hc(*head, cspine)
             }
@@ -406,6 +425,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return v;
         }
         let v = value::mk_pi(self.arena, binder_name, binder_style, domain, body);
+        v.mark_canonical();
         self.tc_cache.pi_hc.insert(key, v);
         v
     }
@@ -478,7 +498,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                         }
                         _ => self.eval(depth, env, first_fun),
                     };
-                    if let Value::Rigid { head, spine } = f_val {
+                    if let Value::Rigid { head, spine, .. } = f_val {
                         let head_copy = *head;
                         let head_spine = *spine;
                         let is_nat_ctor = nat_ext && matches!(head_copy, RigidHead::Ctor(_, _));
@@ -522,7 +542,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                         last_f_val = Some(v);
                         v
                     };
-                    if let Value::Rigid { head, spine } = f_val {
+                    if let Value::Rigid { head, spine, .. } = f_val {
                         let head_copy = *head;
                         let is_nat_ctor = nat_ext && matches!(head_copy, RigidHead::Ctor(_, _));
                         if !is_nat_ctor {
@@ -731,7 +751,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 let env = value::env_extend(self.arena, clo_env, a);
                 self.eval(depth, env, clo_body)
             }
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let head_copy = *head;
                 if self.nat_extension {
                     if let RigidHead::Ctor(name, _) = head_copy {
@@ -865,7 +885,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 let levels = self.ctx.alloc_levels_slice(&[]);
                 value::mk_rigid_head_with_empty(self.arena, RigidHead::Inductive(n, levels), self.empty_spine())
             }
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let head_ty = self.rigid_head_type(depth, *head);
                 let prev = value::mk_rigid_head_with_empty(self.arena, *head, self.empty_spine());
                 self.spine_type_with_value(depth, head_ty, prev, spine)
@@ -975,7 +995,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     fn proj_extend_spine(&mut self, ty_name: NamePtr<'t>, idx: u16, v: V<'t>) -> V<'t> {
         match v {
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let (h, sp) = (*head, *spine);
                 let ns = self.spine_snoc_hc(sp, Elim::proj(ty_name, idx));
                 self.mk_rigid_hc(h, ns)
@@ -1106,7 +1126,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             return ForceStep::Reduced(c);
         }
         match v {
-            Value::Rigid { head: RigidHead::Recursor(name, levels), spine } => {
+            Value::Rigid { head: RigidHead::Recursor(name, levels), spine, .. } => {
                 let env = self.env;
                 let rec = match env.get_recursor(name) {
                     Some(r) => r,
@@ -1138,7 +1158,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                     }
                 }
             }
-            Value::Rigid { head: RigidHead::QuotConst(name, _), spine } => {
+            Value::Rigid { head: RigidHead::QuotConst(name, _), spine, .. } => {
                 let cache = self.ctx.export_file.name_cache;
                 let qmk_pos = if Some(*name) == cache.quot_lift {
                     5
@@ -1205,7 +1225,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     fn fire_value(&mut self, depth: u32, rec_val: V<'t>, major: V<'t>) -> Option<V<'t>> {
         match rec_val {
-            Value::Rigid { head: RigidHead::Recursor(name, levels), spine } => {
+            Value::Rigid { head: RigidHead::Recursor(name, levels), spine, .. } => {
                 let env = self.env;
                 let rec = env.get_recursor(name)?;
                 let args = self.spine_apps(depth, spine)?;
@@ -1214,7 +1234,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 }
                 self.fire_recursor(depth, &rec, *levels, &args, major)
             }
-            Value::Rigid { head: RigidHead::QuotConst(name, _), spine } => {
+            Value::Rigid { head: RigidHead::QuotConst(name, _), spine, .. } => {
                 let args = self.spine_apps(depth, spine)?;
                 self.fire_quot(depth, *name, &args, major)
             }
@@ -1229,7 +1249,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn unfold_value_go(&mut self, depth: u32, v: V<'t>, force: bool) -> V<'t> {
-        if let Value::Unfold { head, spine, head_value, forced } = v {
+        if let Value::Unfold { head, spine, head_value, forced, .. } = v {
             if let Some(f) = forced.get() {
                 return f;
             }

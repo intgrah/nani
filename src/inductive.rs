@@ -320,7 +320,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut params = Vec::with_capacity(num_params as usize);
         let mut cur = self.value_of(e);
         for _ in 0..num_params {
-            let Some(Value::Pi { binder_name, binder_style, domain, body }) = self.force_pi(depth, cur) else {
+            let Some(Value::Pi { binder_name, binder_style, domain, body, .. }) = self.force_pi(depth, cur) else {
                 panic!("exhausted telescope early")
             };
             let (binder_name, binder_style, domain) = (*binder_name, *binder_style, *domain);
@@ -385,7 +385,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cur = self.value_of(ind_ty);
         let mut indices = Vec::new();
         let mut i = 0;
-        while let Some(Value::Pi { binder_name, binder_style, domain, body }) = self.force_pi(depth, cur) {
+        while let Some(Value::Pi { binder_name, binder_style, domain, body, .. }) = self.force_pi(depth, cur) {
             let (binder_name, binder_style, domain) = (*binder_name, *binder_style, *domain);
             if i < st.local_params.len() {
                 let stored = st.local_params[i].2;
@@ -421,7 +421,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cur = self.value_of(ind.ty);
         let mut indices = Vec::new();
         let mut i = 0;
-        while let Some(Value::Pi { binder_name, binder_style, domain, body }) = self.force_pi(depth, cur) {
+        while let Some(Value::Pi { binder_name, binder_style, domain, body, .. }) = self.force_pi(depth, cur) {
             let (binder_name, binder_style, domain) = (*binder_name, *binder_style, *domain);
             if i >= st.local_params.len() {
                 let binder_type = self.quote(depth, domain);
@@ -735,7 +735,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return
             }
             match cur {
-                Value::Pi { binder_name, binder_style, domain, body } => {
+                Value::Pi { binder_name, binder_style, domain, body, .. } => {
                     let (binder_name, binder_style, domain, body) = (*binder_name, *binder_style, *domain, *body);
                     if self.value_has_ind_occ(depth, domain, st.ind_consts.as_ref()) {
                         panic!("non-positive occurrence");
@@ -805,7 +805,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let r = match v {
             Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => false,
-            Value::Rigid { head, spine } => {
+            Value::Rigid { head, spine, .. } => {
                 let head_hit = match *head {
                     RigidHead::BVar(_, ty) => self.value_has_ind_occ(depth, ty, haystack),
                     RigidHead::Axiom(n, _)
@@ -874,13 +874,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn is_bvar_at(v: V<'t>, level: u32) -> bool {
-        matches!(v, Value::Rigid { head: RigidHead::BVar(l, _), spine } if *l == level && spine.is_empty())
+        matches!(v, Value::Rigid { head: RigidHead::BVar(l, _), spine, .. } if *l == level && spine.is_empty())
     }
 
     fn which_valid_ind_app_v(&mut self, st: &InductiveCheckState<'t>, depth: u32, v: V<'t>) -> Option<usize> {
         let f = self.force_all(depth, v);
         let (name, levels, spine) = match f {
-            Value::Rigid { head: RigidHead::Inductive(n, ls), spine } => (*n, *ls, *spine),
+            Value::Rigid { head: RigidHead::Inductive(n, ls), spine, .. } => (*n, *ls, *spine),
             _ => return None,
         };
         let pos = st.ind_consts.iter().copied().position(|x| match self.ctx.read_expr(x) {
@@ -1160,7 +1160,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut depth = depth0;
         let mut cur = cursor;
         let mut xs = Vec::new();
-        while let Some(Value::Pi { binder_name, binder_style, domain, body }) = self.force_pi(depth, cur) {
+        while let Some(Value::Pi { binder_name, binder_style, domain, body, .. }) = self.force_pi(depth, cur) {
             let (binder_name, binder_style, domain) = (*binder_name, *binder_style, *domain);
             let dom_e = self.quote(depth, domain);
             let fresh = self.mk_bvar_hc(depth, domain);
@@ -1190,7 +1190,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let lv = self.mk_bvar_hc(u32::try_from(i).expect("parameter count exceeds u32"), domain);
             cur = self.apply_closure(depth, body, lv, Some(domain));
         }
-        while let Some(Value::Pi { binder_name, binder_style, domain, body }) = self.weak_pi(depth, cur) {
+        while let Some(Value::Pi { binder_name, binder_style, domain, body, .. }) = self.weak_pi(depth, cur) {
             let (binder_name, binder_style, domain) = (*binder_name, *binder_style, *domain);
             let binder_type = self.quote(depth, domain);
             let is_rec = self.is_rec_argument_v(st, domain, depth).is_some();

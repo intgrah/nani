@@ -98,12 +98,14 @@ pub enum Value<'a> {
     Rigid {
         head: RigidHead<'a>,
         spine: S<'a>,
+        canon: Cell<bool>,
     },
     Unfold {
         head: UnfoldHead<'a>,
         spine: S<'a>,
         head_value: &'a OnceCell<V<'a>>,
         forced: OnceCell<V<'a>>,
+        canon: Cell<bool>,
     },
     Lam {
         binder_name: NamePtr<'a>,
@@ -111,12 +113,14 @@ pub enum Value<'a> {
         binder_type: ExprPtr<'a>,
         domain: OnceCell<V<'a>>,
         body: Closure<'a>,
+        canon: Cell<bool>,
     },
     Pi {
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         domain: V<'a>,
         body: Closure<'a>,
+        canon: Cell<bool>,
     },
     Sort {
         level: LevelPtr<'a>,
@@ -132,6 +136,30 @@ pub enum Value<'a> {
         expr: ExprPtr<'a>,
         forced: OnceCell<V<'a>>,
     },
+}
+
+impl<'a> Value<'a> {
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        match self {
+            Value::Rigid { canon, .. }
+            | Value::Unfold { canon, .. }
+            | Value::Lam { canon, .. }
+            | Value::Pi { canon, .. } => canon.get(),
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn mark_canonical(&self) {
+        match self {
+            Value::Rigid { canon, .. }
+            | Value::Unfold { canon, .. }
+            | Value::Lam { canon, .. }
+            | Value::Pi { canon, .. } => canon.set(true),
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -194,7 +222,7 @@ pub enum Ctx<'a> {
 #[derive(Debug)]
 pub enum Spine<'a> {
     Empty,
-    Snoc { prev: S<'a>, elim: Elim<'a>, len: u32 },
+    Snoc { prev: S<'a>, elim: Elim<'a>, len: u32, canon: Cell<bool> },
 }
 
 impl<'a> Env<'a> {
@@ -243,6 +271,21 @@ impl<'a> Ctx<'a> {
 }
 
 impl<'a> Spine<'a> {
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        match self {
+            Spine::Empty => true,
+            Spine::Snoc { canon, .. } => canon.get(),
+        }
+    }
+
+    #[inline]
+    pub fn mark_canonical(&self) {
+        if let Spine::Snoc { canon, .. } = self {
+            canon.set(true);
+        }
+    }
+
     pub fn is_empty(&self) -> bool { matches!(self, Spine::Empty) }
 
     #[inline]
@@ -296,11 +339,11 @@ pub fn ctx_empty<'a>(arena: &'a Bump) -> C<'a> { arena.alloc(Ctx::Nil) }
 pub fn ctx_extend<'a>(arena: &'a Bump, parent: C<'a>, ty: V<'a>) -> C<'a> { arena.alloc(Ctx::Cons { ty, parent }) }
 pub fn spine_empty<'a>(arena: &'a Bump) -> S<'a> { arena.alloc(Spine::Empty) }
 pub fn spine_snoc<'a>(arena: &'a Bump, prev: S<'a>, elim: Elim<'a>) -> S<'a> {
-    arena.alloc(Spine::Snoc { prev, elim, len: prev.len() + 1 })
+    arena.alloc(Spine::Snoc { prev, elim, len: prev.len() + 1, canon: Cell::new(false) })
 }
 
 pub fn mk_rigid<'a>(arena: &'a Bump, head: RigidHead<'a>, spine: S<'a>) -> V<'a> {
-    arena.alloc(Value::Rigid { head, spine })
+    arena.alloc(Value::Rigid { head, spine, canon: Cell::new(false) })
 }
 
 pub fn mk_unfold<'a>(
@@ -310,7 +353,7 @@ pub fn mk_unfold<'a>(
     spine: S<'a>,
     head_value: &'a OnceCell<V<'a>>,
 ) -> V<'a> {
-    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine, head_value, forced: OnceCell::new() })
+    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine, head_value, forced: OnceCell::new(), canon: Cell::new(false) })
 }
 pub fn mk_unfold_head_with_empty<'a>(
     arena: &'a Bump,
@@ -323,7 +366,7 @@ pub fn mk_unfold_head_with_empty<'a>(
     if let Some(hv) = head_value.get() {
         let _ = forced.set(*hv);
     }
-    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine: empty, head_value, forced })
+    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine: empty, head_value, forced, canon: Cell::new(false) })
 }
 pub fn mk_lam<'a>(
     arena: &'a Bump,
@@ -332,7 +375,7 @@ pub fn mk_lam<'a>(
     binder_type: ExprPtr<'a>,
     body: Closure<'a>,
 ) -> V<'a> {
-    arena.alloc(Value::Lam { binder_name, binder_style, binder_type, domain: OnceCell::new(), body })
+    arena.alloc(Value::Lam { binder_name, binder_style, binder_type, domain: OnceCell::new(), body, canon: Cell::new(false) })
 }
 pub fn mk_pi<'a>(
     arena: &'a Bump,
@@ -341,16 +384,16 @@ pub fn mk_pi<'a>(
     domain: V<'a>,
     body: Closure<'a>,
 ) -> V<'a> {
-    arena.alloc(Value::Pi { binder_name, binder_style, domain, body })
+    arena.alloc(Value::Pi { binder_name, binder_style, domain, body, canon: Cell::new(false) })
 }
 pub fn mk_sort<'a>(arena: &'a Bump, level: LevelPtr<'a>) -> V<'a> { arena.alloc(Value::Sort { level }) }
 pub fn mk_natlit<'a>(arena: &'a Bump, ptr: BigUintPtr<'a>) -> V<'a> { arena.alloc(Value::NatLit { ptr }) }
 pub fn mk_strlit<'a>(arena: &'a Bump, ptr: StringPtr<'a>) -> V<'a> { arena.alloc(Value::StrLit { ptr }) }
 pub fn mk_bvar_with_empty<'a>(arena: &'a Bump, level: u32, ty: V<'a>, empty: S<'a>) -> V<'a> {
-    arena.alloc(Value::Rigid { head: RigidHead::BVar(level, ty), spine: empty })
+    arena.alloc(Value::Rigid { head: RigidHead::BVar(level, ty), spine: empty, canon: Cell::new(false) })
 }
 pub fn mk_rigid_head_with_empty<'a>(arena: &'a Bump, head: RigidHead<'a>, empty: S<'a>) -> V<'a> {
-    arena.alloc(Value::Rigid { head, spine: empty })
+    arena.alloc(Value::Rigid { head, spine: empty, canon: Cell::new(false) })
 }
 pub fn mk_thunk<'a>(arena: &'a Bump, env: E<'a>, expr: ExprPtr<'a>) -> V<'a> {
     arena.alloc(Value::Thunk { env, expr, forced: OnceCell::new() })

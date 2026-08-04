@@ -200,7 +200,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         let struct_ty_f = self.force_all(depth, struct_ty);
         let struct_ty_is_prop = self.is_prop_type(depth, struct_ty_f);
         let (ind_name, ind_levels, spine) = match struct_ty_f {
-            Value::Rigid { head: RigidHead::Inductive(n, ls), spine } => (*n, *ls, *spine),
+            Value::Rigid { head: RigidHead::Inductive(n, ls), spine, .. } => (*n, *ls, *spine),
             _ => panic!("projection structure type is not an inductive"),
         };
         assert!(ind_name == ty_name, "projection type name does not match the structure's inductive");

@@ -128,33 +128,33 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             (Value::NatLit { ptr: px }, Value::NatLit { ptr: py }) => px == py,
             (Value::StrLit { ptr: px }, Value::StrLit { ptr: py }) => px == py,
 
-            (Value::Rigid { head: hx, spine: sx }, Value::Rigid { head: hy, spine: sy }) if rigid_head_eq(*hx, *hy) =>
+            (Value::Rigid { head: hx, spine: sx, .. }, Value::Rigid { head: hy, spine: sy, .. }) if rigid_head_eq(*hx, *hy) =>
                 self.unify_spine::<RIGID>(depth, sx, sy),
 
             (
-                Value::Rigid { head: RigidHead::Ctor(nx, lx), spine: sx },
-                Value::Rigid { head: RigidHead::Ctor(ny, ly), spine: sy },
+                Value::Rigid { head: RigidHead::Ctor(nx, lx), spine: sx, .. },
+                Value::Rigid { head: RigidHead::Ctor(ny, ly), spine: sy, .. },
             ) if nx == ny && self.ctx.eq_antisymm_many(*lx, *ly) => self.unify_spine::<RIGID>(depth, sx, sy),
             (
-                Value::Rigid { head: RigidHead::Inductive(nx, lx), spine: sx },
-                Value::Rigid { head: RigidHead::Inductive(ny, ly), spine: sy },
+                Value::Rigid { head: RigidHead::Inductive(nx, lx), spine: sx, .. },
+                Value::Rigid { head: RigidHead::Inductive(ny, ly), spine: sy, .. },
             ) if nx == ny && self.ctx.eq_antisymm_many(*lx, *ly) => self.unify_spine::<RIGID>(depth, sx, sy),
             (
-                Value::Rigid { head: RigidHead::Axiom(nx, lx), spine: sx },
-                Value::Rigid { head: RigidHead::Axiom(ny, ly), spine: sy },
+                Value::Rigid { head: RigidHead::Axiom(nx, lx), spine: sx, .. },
+                Value::Rigid { head: RigidHead::Axiom(ny, ly), spine: sy, .. },
             ) if nx == ny && self.ctx.eq_antisymm_many(*lx, *ly) => self.unify_spine::<RIGID>(depth, sx, sy),
 
             (
-                Value::Rigid { head: RigidHead::Recursor(nx, lx), spine: sx },
-                Value::Rigid { head: RigidHead::Recursor(ny, ly), spine: sy },
+                Value::Rigid { head: RigidHead::Recursor(nx, lx), spine: sx, .. },
+                Value::Rigid { head: RigidHead::Recursor(ny, ly), spine: sy, .. },
             ) => {
                 let (nx, ny, lx, ly) = (*nx, *ny, *lx, *ly);
                 let heads_match = nx == ny && self.ctx.eq_antisymm_many(lx, ly);
                 self.unify_iota::<RIGID>(depth, t, t2, heads_match, sx, sy)
             }
             (
-                Value::Rigid { head: RigidHead::QuotConst(nx, lx), spine: sx },
-                Value::Rigid { head: RigidHead::QuotConst(ny, ly), spine: sy },
+                Value::Rigid { head: RigidHead::QuotConst(nx, lx), spine: sx, .. },
+                Value::Rigid { head: RigidHead::QuotConst(ny, ly), spine: sy, .. },
             ) => {
                 let (nx, ny, lx, ly) = (*nx, *ny, *lx, *ly);
                 let heads_match = nx == ny && self.ctx.eq_antisymm_many(lx, ly);
@@ -494,7 +494,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     fn try_eta_struct_v(&mut self, depth: u32, ind_name: NamePtr<'t>, x: V<'t>, y: V<'t>) -> bool {
         let (yname, yspine) = match y {
-            Value::Rigid { head: RigidHead::Ctor(name, _), spine } => (*name, *spine),
+            Value::Rigid { head: RigidHead::Ctor(name, _), spine, .. } => (*name, *spine),
             _ => return false,
         };
         let (num_params, num_fields, inductive_name) = match self.ctor_shape(yname) {
@@ -563,7 +563,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     fn value_is_nat_zero(&self, v: V<'t>) -> bool {
         match v {
-            Value::Rigid { head: RigidHead::Ctor(name, _), spine } =>
+            Value::Rigid { head: RigidHead::Ctor(name, _), spine, .. } =>
                 Some(*name) == self.ctx.export_file.name_cache.nat_zero && spine.is_empty(),
             Value::NatLit { ptr } => {
                 use num_traits::Zero;
@@ -575,7 +575,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     fn value_nat_pred(&mut self, v: V<'t>) -> Option<V<'t>> {
         match v {
-            Value::Rigid { head: RigidHead::Ctor(name, _), spine } => {
+            Value::Rigid { head: RigidHead::Ctor(name, _), spine, .. } => {
                 if Some(*name) == self.ctx.export_file.name_cache.nat_succ {
                     if let Spine::Snoc { prev: Spine::Empty, elim, .. } = **spine {
                     if let ElimView::App(a) = elim.view() {
