@@ -58,7 +58,10 @@ fn run_case_inner(export: PathBuf) -> Outcome {
         export_file_path: Some(export),
         use_stdin: false,
         permitted_axioms: None,
+
+        permit_standard_axioms: false,
         unpermitted_axiom_hard_error: false,
+        parse_only: false,
         num_threads: 1,
         nat_extension: true,
         string_extension: true,

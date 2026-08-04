@@ -1,4 +1,4 @@
-use crate::util::{Config, CowStr, ExportFile, ExprPtr, LevelPtr, TcCtx};
+use crate::util::{Config, CowStr, ExportFile, LevelPtr, TcCtx};
 use rand::distributions::Alphanumeric;
 use rand::{rngs::ThreadRng, Rng};
 use std::error::Error;
@@ -11,7 +11,9 @@ fn test_config(config_path: Option<&Path>) -> Result<Config, Box<dyn Error>> {
             export_file_path: Some(PathBuf::from("test_resources/Empty/export")),
             use_stdin: false,
             permitted_axioms: Some(Vec::new()),
+            permit_standard_axioms: false,
             unpermitted_axiom_hard_error: true,
+            parse_only: false,
             nat_extension: false,
             string_extension: false,
             pp_declars: None,
@@ -48,7 +50,7 @@ pub(crate) fn test_export_file_should_panic<A>(config_path: Option<&Path>, f: im
 }
 
 pub(crate) fn test_ctx<'p, A>(path: Option<&Path>, f: impl FnOnce(&mut TcCtx) -> A) -> Result<A, Box<dyn Error>> {
-    test_export_file(path, |export_file| export_file.with_ctx(|ctx, _arena| f(ctx)))
+    test_export_file(path, |export_file| export_file.with_ctx(|ctx, _cache, _arena| f(ctx)))
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -58,17 +60,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             l = self.succ(l);
         }
         l
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn mk_succ_app(&mut self, n: usize) -> ExprPtr<'t> {
-        let mut out = self.c_nat_zero().unwrap();
-        let succ = self.c_nat_succ().unwrap();
-        for _ in 0..n {
-            out = self.mk_app(succ, out);
-        }
-        out
     }
 
     #[cfg(test)]
@@ -170,7 +161,7 @@ fn hash_test0() -> Result<(), Box<dyn Error>> {
     use rand::thread_rng;
     test_export_file(None, |export| {
         let mut rng = thread_rng();
-        export.with_ctx(|ctx, _arena| {
+        export.with_ctx(|ctx, _cache, _arena| {
             for size in 0..100 {
                 for _ in 0..100 {
                     let s = rand_string(&mut rng, size);
