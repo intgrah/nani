@@ -124,9 +124,9 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     fn unify_direct<const RIGID: bool>(&mut self, depth: u32, t: V<'t>, t2: V<'t>) -> bool {
         match (t, t2) {
-            (Value::Sort { level: lx }, Value::Sort { level: ly }) => self.ctx.eq_antisymm(*lx, *ly),
-            (Value::NatLit { ptr: px }, Value::NatLit { ptr: py }) => px == py,
-            (Value::StrLit { ptr: px }, Value::StrLit { ptr: py }) => px == py,
+            (Value::Sort { level: lx , .. }, Value::Sort { level: ly , .. }) => self.ctx.eq_antisymm(*lx, *ly),
+            (Value::NatLit { ptr: px , .. }, Value::NatLit { ptr: py , .. }) => px == py,
+            (Value::StrLit { ptr: px , .. }, Value::StrLit { ptr: py , .. }) => px == py,
 
             (Value::Rigid { head: hx, spine: sx, .. }, Value::Rigid { head: hy, spine: sy, .. }) if rigid_head_eq(*hx, *hy) =>
                 self.unify_spine::<RIGID>(depth, sx, sy),
@@ -565,7 +565,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         match v {
             Value::Rigid { head: RigidHead::Ctor(name, _), spine, .. } =>
                 Some(*name) == self.ctx.export_file.name_cache.nat_zero && spine.is_empty(),
-            Value::NatLit { ptr } => {
+            Value::NatLit { ptr , .. } => {
                 use num_traits::Zero;
                 self.ctx.read_bignum(*ptr).map(|n| n.is_zero()).unwrap_or(false)
             }
@@ -585,7 +585,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 }
                 None
             }
-            Value::NatLit { ptr } => {
+            Value::NatLit { ptr , .. } => {
                 use num_traits::Zero;
                 let n = self.ctx.read_bignum(*ptr)?.clone();
                 if n.is_zero() {
@@ -601,7 +601,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     pub(crate) fn level_of_type(&mut self, depth: u32, ty: V<'t>) -> Option<LevelPtr<'t>> {
         let ty = self.force_thunk(depth, ty);
         match ty {
-            Value::Sort { level } => {
+            Value::Sort { level , .. } => {
                 let s = self.ctx.succ(*level);
                 Some(self.ctx.simplify(s))
             }
@@ -630,14 +630,14 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 let t = self.value_type(depth, ty);
                 let t_f = self.force_all(depth, t);
                 match t_f {
-                    Value::Sort { level } => Some(self.ctx.simplify(*level)),
+                    Value::Sort { level , .. } => Some(self.ctx.simplify(*level)),
                     _ => None,
                 }
             }
             Value::Unfold { head: UnfoldHead { name, levels }, .. } => {
                 let t = self.value_type(depth, ty);
                 let t_f = self.force_all(depth, t);
-                if let Value::Sort { level } = t_f {
+                if let Value::Sort { level , .. } = t_f {
                     return Some(self.ctx.simplify(*level));
                 }
                 self.const_result_level(*name, *levels)
@@ -646,7 +646,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 let t = self.value_type(depth, ty);
                 let ty_f = self.force_all(depth, t);
                 match ty_f {
-                    Value::Sort { level } => Some(self.ctx.simplify(*level)),
+                    Value::Sort { level , .. } => Some(self.ctx.simplify(*level)),
                     _ => None,
                 }
             }

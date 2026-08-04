@@ -99,6 +99,7 @@ pub enum Value<'a> {
         head: RigidHead<'a>,
         spine: S<'a>,
         canon: Cell<bool>,
+        key: Cell<u64>,
     },
     Unfold {
         head: UnfoldHead<'a>,
@@ -106,14 +107,15 @@ pub enum Value<'a> {
         head_value: &'a OnceCell<V<'a>>,
         forced: OnceCell<V<'a>>,
         canon: Cell<bool>,
+        key: Cell<u64>,
     },
     Lam {
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
-        domain: OnceCell<V<'a>>,
         body: Closure<'a>,
         canon: Cell<bool>,
+        key: Cell<u64>,
     },
     Pi {
         binder_name: NamePtr<'a>,
@@ -121,24 +123,63 @@ pub enum Value<'a> {
         domain: V<'a>,
         body: Closure<'a>,
         canon: Cell<bool>,
+        key: Cell<u64>,
     },
     Sort {
         level: LevelPtr<'a>,
+        key: Cell<u64>,
     },
     NatLit {
         ptr: BigUintPtr<'a>,
+        key: Cell<u64>,
     },
     StrLit {
         ptr: StringPtr<'a>,
+        key: Cell<u64>,
     },
     Thunk {
         env: E<'a>,
         expr: ExprPtr<'a>,
         forced: OnceCell<V<'a>>,
+        key: Cell<u64>,
     },
 }
 
+#[inline]
+pub fn kmix(a: u64, b: u64) -> u64 { (a ^ b).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29) }
+
+const KEY_PRESENT: u64 = 1 << 63;
+
+#[inline]
+fn seal(d: u64, closed: bool) -> u64 { (d & !1) | u64::from(closed) | KEY_PRESENT }
+
 impl<'a> Value<'a> {
+    #[inline]
+    fn key_cell(&self) -> &Cell<u64> {
+        match self {
+            Value::Rigid { key, .. }
+            | Value::Unfold { key, .. }
+            | Value::Lam { key, .. }
+            | Value::Pi { key, .. }
+            | Value::Sort { key, .. }
+            | Value::NatLit { key, .. }
+            | Value::StrLit { key, .. }
+            | Value::Thunk { key, .. } => key,
+        }
+    }
+
+    #[inline]
+    pub fn digest(&self) -> u64 {
+        let cell = self.key_cell();
+        let k = cell.get();
+        if k & KEY_PRESENT != 0 {
+            return k;
+        }
+        let d = self.compute_key();
+        cell.set(d);
+        d
+    }
+
     #[inline]
     pub fn is_canonical(&self) -> bool {
         match self {
@@ -160,6 +201,71 @@ impl<'a> Value<'a> {
             _ => {}
         }
     }
+
+    fn compute_key(&self) -> u64 {
+        match self {
+            Value::Rigid { head, spine, .. } => {
+                let (h, c) = head_key(*head);
+                seal(kmix(h, spine.key()), c && spine.is_closed())
+            }
+            Value::Unfold { head, spine, .. } => {
+                let h = kmix(kmix(10, head.name.get_hash()), head.levels.get_hash());
+                seal(kmix(h, spine.key()), spine.is_closed())
+            }
+            Value::Lam { binder_name, binder_style, binder_type, body, .. } => {
+                let (b, c) = closure_key(body);
+                let h = kmix(
+                    kmix(kmix(11, binder_name.get_hash()), *binder_style as u64),
+                    binder_type.as_ref() as *const crate::expr::Expr<'a> as usize as u64,
+                );
+                seal(kmix(h, b), c)
+            }
+            Value::Pi { binder_name, binder_style, domain, body, .. } => {
+                let (b, c) = closure_key(body);
+                let h = kmix(kmix(12, binder_name.get_hash()), *binder_style as u64);
+                seal(kmix(kmix(h, domain.digest()), b), c && domain.is_closed())
+            }
+            Value::Sort { level, .. } => seal(kmix(1, level.get_hash()), true),
+            Value::NatLit { ptr, .. } => seal(kmix(2, ptr.get_hash()), true),
+            Value::StrLit { ptr, .. } => seal(kmix(3, ptr.get_hash()), true),
+            Value::Thunk { env, expr, .. } => {
+                let (e, c) = env_slots_key(env, expr.num_loose_bvars());
+                seal(kmix(kmix(13, expr.as_ref() as *const crate::expr::Expr<'a> as usize as u64), e), c)
+            }
+        }
+    }
+
+    #[inline]
+    pub fn is_closed(&self) -> bool { self.digest() & 1 == 1 }
+}
+
+fn head_key(head: RigidHead<'_>) -> (u64, bool) {
+    match head {
+        RigidHead::BVar(lvl, ty) => (kmix(kmix(4, u64::from(lvl)), ty.digest()), false),
+        RigidHead::Axiom(n, ls) => (kmix(kmix(5, n.get_hash()), ls.get_hash()), true),
+        RigidHead::Ctor(n, ls) => (kmix(kmix(6, n.get_hash()), ls.get_hash()), true),
+        RigidHead::Recursor(n, ls) => (kmix(kmix(7, n.get_hash()), ls.get_hash()), true),
+        RigidHead::QuotConst(n, ls) => (kmix(kmix(8, n.get_hash()), ls.get_hash()), true),
+        RigidHead::Inductive(n, ls) => (kmix(kmix(9, n.get_hash()), ls.get_hash()), true),
+    }
+}
+
+fn env_slots_key(env: E<'_>, count: u16) -> (u64, bool) {
+    let mut d = lsub_key(env.lsub());
+    let mut closed = true;
+    for i in 0..count {
+        if let Some(v) = env.lookup(i) {
+            d = kmix(kmix(d, u64::from(i)), v.digest());
+            closed &= v.is_closed();
+        }
+    }
+    (d, closed)
+}
+
+fn closure_key(clo: &Closure<'_>) -> (u64, bool) {
+    let (e, c) = env_slots_key(clo.env, clo.body.num_loose_bvars().saturating_sub(1));
+    let d = kmix(clo.body.as_ref() as *const crate::expr::Expr<'_> as usize as u64, e);
+    (d, c && clo.ctx.is_none())
 }
 
 #[derive(Debug)]
@@ -189,6 +295,13 @@ pub enum Env<'a> {
     },
 }
 
+pub fn lsub_key(lsub: Option<&LevelSub<'_>>) -> u64 {
+    match lsub {
+        None => 1,
+        Some(ls) => kmix(kmix(14, ls.ks.get_hash()), ls.vs.get_hash()) | 1,
+    }
+}
+
 impl<'a> Env<'a> {
     #[inline]
     pub fn get_hash(&self) -> u64 {
@@ -211,6 +324,7 @@ impl<'a> Env<'a> {
             Env::Nil { lsub, .. } | Env::Cons { lsub, .. } | Env::Framed { lsub, .. } => *lsub,
         }
     }
+
 }
 
 #[derive(Debug)]
@@ -222,7 +336,45 @@ pub enum Ctx<'a> {
 #[derive(Debug)]
 pub enum Spine<'a> {
     Empty,
-    Snoc { prev: S<'a>, elim: Elim<'a>, len: u32, canon: Cell<bool> },
+    Snoc { prev: S<'a>, elim: Elim<'a>, len: u32, canon: Cell<bool>, key: Cell<u64> },
+}
+
+impl<'a> Spine<'a> {
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        match self {
+            Spine::Empty => true,
+            Spine::Snoc { canon, .. } => canon.get(),
+        }
+    }
+
+    #[inline]
+    pub fn mark_canonical(&self) {
+        if let Spine::Snoc { canon, .. } = self {
+            canon.set(true);
+        }
+    }
+
+    #[inline]
+    pub fn key(&self) -> u64 {
+        let Spine::Snoc { prev, elim, key, .. } = self else { return seal(15, true) };
+        let k = key.get();
+        if k & KEY_PRESENT != 0 {
+            return k;
+        }
+        let k = match elim.view() {
+            ElimView::App(v) => seal(kmix(prev.key(), v.digest()), prev.is_closed() && v.is_closed()),
+            ElimView::Proj { ty_name, idx } => seal(
+                kmix(kmix(prev.key(), ty_name.get_hash()), u64::from(idx) | (1 << 60)),
+                prev.is_closed(),
+            ),
+        };
+        key.set(k);
+        k
+    }
+
+    #[inline]
+    pub fn is_closed(&self) -> bool { self.key() & 1 == 1 }
 }
 
 impl<'a> Env<'a> {
@@ -271,21 +423,6 @@ impl<'a> Ctx<'a> {
 }
 
 impl<'a> Spine<'a> {
-    #[inline]
-    pub fn is_canonical(&self) -> bool {
-        match self {
-            Spine::Empty => true,
-            Spine::Snoc { canon, .. } => canon.get(),
-        }
-    }
-
-    #[inline]
-    pub fn mark_canonical(&self) {
-        if let Spine::Snoc { canon, .. } = self {
-            canon.set(true);
-        }
-    }
-
     pub fn is_empty(&self) -> bool { matches!(self, Spine::Empty) }
 
     #[inline]
@@ -321,7 +458,9 @@ impl<'a> Spine<'a> {
     }
 }
 
-pub fn env_empty<'a>(arena: &'a Bump) -> E<'a> { arena.alloc(Env::Nil { lsub: None, hash: 0 }) }
+pub fn env_empty<'a>(arena: &'a Bump) -> E<'a> {
+    arena.alloc(Env::Nil { lsub: None, hash: 0 })
+}
 pub fn env_extend<'a>(arena: &'a Bump, parent: E<'a>, v: V<'a>) -> E<'a> {
     let v_hash = v as *const Value<'a> as usize as u64;
     let parent_hash = parent.get_hash();
@@ -339,11 +478,11 @@ pub fn ctx_empty<'a>(arena: &'a Bump) -> C<'a> { arena.alloc(Ctx::Nil) }
 pub fn ctx_extend<'a>(arena: &'a Bump, parent: C<'a>, ty: V<'a>) -> C<'a> { arena.alloc(Ctx::Cons { ty, parent }) }
 pub fn spine_empty<'a>(arena: &'a Bump) -> S<'a> { arena.alloc(Spine::Empty) }
 pub fn spine_snoc<'a>(arena: &'a Bump, prev: S<'a>, elim: Elim<'a>) -> S<'a> {
-    arena.alloc(Spine::Snoc { prev, elim, len: prev.len() + 1, canon: Cell::new(false) })
+    arena.alloc(Spine::Snoc { prev, elim, len: prev.len() + 1, canon: Cell::new(false), key: Cell::new(0) })
 }
 
 pub fn mk_rigid<'a>(arena: &'a Bump, head: RigidHead<'a>, spine: S<'a>) -> V<'a> {
-    arena.alloc(Value::Rigid { head, spine, canon: Cell::new(false) })
+    arena.alloc(Value::Rigid { head, spine, canon: Cell::new(false), key: Cell::new(0) })
 }
 
 pub fn mk_unfold<'a>(
@@ -353,7 +492,14 @@ pub fn mk_unfold<'a>(
     spine: S<'a>,
     head_value: &'a OnceCell<V<'a>>,
 ) -> V<'a> {
-    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine, head_value, forced: OnceCell::new(), canon: Cell::new(false) })
+    arena.alloc(Value::Unfold {
+        head: UnfoldHead { name, levels },
+        spine,
+        head_value,
+        forced: OnceCell::new(),
+        canon: Cell::new(false),
+        key: Cell::new(0),
+    })
 }
 pub fn mk_unfold_head_with_empty<'a>(
     arena: &'a Bump,
@@ -366,7 +512,7 @@ pub fn mk_unfold_head_with_empty<'a>(
     if let Some(hv) = head_value.get() {
         let _ = forced.set(*hv);
     }
-    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine: empty, head_value, forced, canon: Cell::new(false) })
+    arena.alloc(Value::Unfold { head: UnfoldHead { name, levels }, spine: empty, head_value, forced, canon: Cell::new(false), key: Cell::new(0) })
 }
 pub fn mk_lam<'a>(
     arena: &'a Bump,
@@ -375,7 +521,7 @@ pub fn mk_lam<'a>(
     binder_type: ExprPtr<'a>,
     body: Closure<'a>,
 ) -> V<'a> {
-    arena.alloc(Value::Lam { binder_name, binder_style, binder_type, domain: OnceCell::new(), body, canon: Cell::new(false) })
+    arena.alloc(Value::Lam { binder_name, binder_style, binder_type, body, canon: Cell::new(false), key: Cell::new(0) })
 }
 pub fn mk_pi<'a>(
     arena: &'a Bump,
@@ -384,19 +530,32 @@ pub fn mk_pi<'a>(
     domain: V<'a>,
     body: Closure<'a>,
 ) -> V<'a> {
-    arena.alloc(Value::Pi { binder_name, binder_style, domain, body, canon: Cell::new(false) })
+    arena.alloc(Value::Pi { binder_name, binder_style, domain, body, canon: Cell::new(false), key: Cell::new(0) })
 }
-pub fn mk_sort<'a>(arena: &'a Bump, level: LevelPtr<'a>) -> V<'a> { arena.alloc(Value::Sort { level }) }
-pub fn mk_natlit<'a>(arena: &'a Bump, ptr: BigUintPtr<'a>) -> V<'a> { arena.alloc(Value::NatLit { ptr }) }
-pub fn mk_strlit<'a>(arena: &'a Bump, ptr: StringPtr<'a>) -> V<'a> { arena.alloc(Value::StrLit { ptr }) }
+pub fn mk_sort<'a>(arena: &'a Bump, level: LevelPtr<'a>) -> V<'a> {
+    arena.alloc(Value::Sort { level, key: Cell::new(0) })
+}
+pub fn mk_natlit<'a>(arena: &'a Bump, ptr: BigUintPtr<'a>) -> V<'a> {
+    arena.alloc(Value::NatLit { ptr, key: Cell::new(0) })
+}
+pub fn mk_strlit<'a>(arena: &'a Bump, ptr: StringPtr<'a>) -> V<'a> {
+    arena.alloc(Value::StrLit { ptr, key: Cell::new(0) })
+}
 pub fn mk_bvar_with_empty<'a>(arena: &'a Bump, level: u32, ty: V<'a>, empty: S<'a>) -> V<'a> {
-    arena.alloc(Value::Rigid { head: RigidHead::BVar(level, ty), spine: empty, canon: Cell::new(false) })
+    mk_rigid(arena, RigidHead::BVar(level, ty), empty)
 }
 pub fn mk_rigid_head_with_empty<'a>(arena: &'a Bump, head: RigidHead<'a>, empty: S<'a>) -> V<'a> {
-    arena.alloc(Value::Rigid { head, spine: empty, canon: Cell::new(false) })
+    mk_rigid(arena, head, empty)
 }
 pub fn mk_thunk<'a>(arena: &'a Bump, env: E<'a>, expr: ExprPtr<'a>) -> V<'a> {
-    arena.alloc(Value::Thunk { env, expr, forced: OnceCell::new() })
+    arena.alloc(Value::Thunk { env, expr, forced: OnceCell::new(), key: Cell::new(0) })
 }
 
 const _: () = assert!(std::mem::size_of::<Value<'static>>() == 56);
+
+pub fn forced_of<'a>(v: V<'a>) -> Option<V<'a>> {
+    match v {
+        Value::Thunk { forced, .. } | Value::Unfold { forced, .. } => forced.get().copied(),
+        _ => None,
+    }
+}

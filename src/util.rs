@@ -196,6 +196,7 @@ impl<'a> ExprPtr<'a> {
     #[inline]
     pub(crate) fn local(r: &'a Expr<'a>) -> Self { Self::pack(r, EXPR_LOCAL_BIT) }
 
+
     #[inline]
     pub(crate) fn is_local(self) -> bool { self.bits.get() & EXPR_LOCAL_BIT != 0 }
 
@@ -244,10 +245,48 @@ const _: () = assert!(std::mem::align_of::<BigUint>() >= 2);
 #[cfg(not(feature = "top-byte-ignore"))]
 const _: () = assert!(std::mem::align_of::<LevelPtr<'static>>() >= 2);
 
+const LEVELS_ADDR_MASK: u64 = 0x0000_ffff_ffff_ffff;
+const LEVELS_TAG: u64 = 1 << 63;
+const LEVELS_LEN_SHIFT: u32 = 48;
+const LEVELS_LEN_MAX: usize = (1 << 15) - 1;
+
 pub struct LevelsPtr<'a> {
-    ptr: NonNull<LevelPtr<'a>>,
-    len: usize,
+    bits: std::num::NonZeroU64,
     _ph: PhantomData<&'a [LevelPtr<'a>]>,
+}
+
+impl<'a> LevelsPtr<'a> {
+    #[inline]
+    fn pack(s: &'a [LevelPtr<'a>], tag: u64) -> Self {
+        let addr = s.as_ptr() as usize as u64;
+        debug_assert!(addr & !LEVELS_ADDR_MASK == 0, "level slice address exceeds 48 bits");
+        assert!(s.len() <= LEVELS_LEN_MAX, "universe parameter list too long");
+        let bits = addr | ((s.len() as u64) << LEVELS_LEN_SHIFT) | tag | 1;
+        Self { bits: unsafe { std::num::NonZeroU64::new_unchecked(bits) }, _ph: PhantomData }
+    }
+
+    #[inline]
+    pub(crate) fn global(s: &'a [LevelPtr<'a>]) -> Self { Self::pack(s, 0) }
+
+    #[inline]
+    pub(crate) fn local(s: &'a [LevelPtr<'a>]) -> Self { Self::pack(s, LEVELS_TAG) }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn is_local(self) -> bool { self.bits.get() & LEVELS_TAG != 0 }
+
+    #[inline]
+    pub(crate) fn len(self) -> usize { ((self.bits.get() >> LEVELS_LEN_SHIFT) & 0x7fff) as usize }
+
+    #[inline]
+    pub(crate) fn as_ref(self) -> &'a [LevelPtr<'a>] {
+        let p = (self.bits.get() & LEVELS_ADDR_MASK & !1) as usize as *const LevelPtr<'a>;
+        unsafe { std::slice::from_raw_parts(p, self.len()) }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn get_hash(&self) -> u64 { self.bits.get() }
 }
 
 impl<'a> Clone for LevelsPtr<'a> {
@@ -258,36 +297,6 @@ impl<'a> Copy for LevelsPtr<'a> {}
 unsafe impl<'a> Send for LevelsPtr<'a> {}
 unsafe impl<'a> Sync for LevelsPtr<'a> {}
 
-impl<'a> LevelsPtr<'a> {
-    #[inline]
-    pub(crate) fn global(s: &'a [LevelPtr<'a>]) -> Self {
-        let ptr = unsafe { NonNull::new_unchecked(s.as_ptr() as *mut LevelPtr<'a>) };
-        Self { ptr, len: s.len(), _ph: PhantomData }
-    }
-    #[inline]
-    pub(crate) fn local(s: &'a [LevelPtr<'a>]) -> Self {
-        let raw = (s.as_ptr() as *mut LevelPtr<'a>).map_addr(|a| a | PTR_TAG);
-        Self { ptr: unsafe { NonNull::new_unchecked(raw) }, len: s.len(), _ph: PhantomData }
-    }
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn is_local(self) -> bool { self.ptr.as_ptr().addr() & PTR_TAG != 0 }
-    #[cfg(feature = "top-byte-ignore")]
-    #[inline]
-    pub(crate) fn as_ref(self) -> &'a [LevelPtr<'a>] {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-    #[cfg(not(feature = "top-byte-ignore"))]
-    #[inline]
-    pub(crate) fn as_ref(self) -> &'a [LevelPtr<'a>] {
-        let p = self.ptr.as_ptr().map_addr(|a| a & !PTR_TAG);
-        unsafe { std::slice::from_raw_parts(p, self.len) }
-    }
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn get_hash(&self) -> u64 { self.ptr.as_ptr().addr() as u64 }
-}
-
 impl<'a> std::ops::Deref for LevelsPtr<'a> {
     type Target = [LevelPtr<'a>];
     #[inline]
@@ -295,12 +304,12 @@ impl<'a> std::ops::Deref for LevelsPtr<'a> {
 }
 impl<'a> PartialEq for LevelsPtr<'a> {
     #[inline]
-    fn eq(&self, o: &Self) -> bool { self.ptr.as_ptr().addr() == o.ptr.as_ptr().addr() && self.len == o.len }
+    fn eq(&self, o: &Self) -> bool { self.bits == o.bits }
 }
 impl<'a> Eq for LevelsPtr<'a> {}
 impl<'a> std::hash::Hash for LevelsPtr<'a> {
     #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.ptr.as_ptr().addr() as u64) }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.bits.get()) }
 }
 impl<'a> std::fmt::Debug for LevelsPtr<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "LevelsPtr({:?})", self.as_ref()) }
@@ -317,6 +326,9 @@ macro_rules! interner {
             fn with_capacity(cap: usize) -> Self { Self { table: HashTable::with_capacity(cap) } }
             #[allow(dead_code)]
             pub(crate) fn len(&self) -> usize { self.table.len() }
+
+            #[allow(dead_code)]
+            pub(crate) fn clear(&mut self) { self.table.clear() }
 
             pub(crate) fn get<'b>(&self, v: &$pointee<'b>) -> Option<&'a $pointee<'a>>
             where
@@ -496,10 +508,6 @@ pub(crate) fn session_fx_hash_map<K, V>() -> FxHashMap<K, V> {
     FxHashMap::with_capacity_and_hasher(SESSION_MAP_CAP, Default::default())
 }
 
-pub(crate) fn session_fx_hash_set<K>() -> FxHashSet<K> {
-    FxHashSet::with_capacity_and_hasher(SESSION_MAP_CAP, Default::default())
-}
-
 pub(crate) fn small_fx_hash_set<K>() -> FxHashSet<K> {
     FxHashSet::with_capacity_and_hasher(14, Default::default())
 }
@@ -589,7 +597,9 @@ impl<'t> ExprCache<'t> {
         shrink_map(&mut self.dsubst_cache);
         shrink_map(&mut self.simplify_cache);
     }
+}
 
+impl<'t> ExprCache<'t> {
     fn new() -> Self {
         Self {
             inst_cache: small_fx_hash_map(),
@@ -608,7 +618,7 @@ pub struct ExportFile<'p> {
     pub notations: NotationMap<'p>,
     pub name_cache: NameCache<'p>,
     pub config: Config,
-    pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>
+    pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>,
 }
 
 impl<'p> ExportFile<'p> {
@@ -1079,6 +1089,12 @@ pub struct TcCache<'a, 't> {
     pub(crate) conv_cache_neg_probe: FxHashSet<(usize, usize)>,
     pub(crate) probe_depth: u32,
     pub(crate) closed_eval_cache: FxHashMap<ExprPtr<'t>, V<'a>>,
+    pub(crate) whnf_store: FxHashMap<u64, (u128, ExprPtr<'t>)>,
+    pub(crate) whnf_store_filter: Box<[u64; 1024]>,
+    pub(crate) whnf_head_filter: Box<[u64; 1024]>,
+    pub(crate) whnf_admit: Box<[u8; WHNF_ADMIT_LEN]>,
+    pub(crate) lam_domain_cache: FxHashMap<usize, V<'a>>,
+    pub(crate) global_value_cache: FxHashMap<(usize, u32), Result<(u128, bool), u8>>,
     pub(crate) open_eval_cache: FxHashMap<(usize, ExprPtr<'t>), V<'a>>,
     pub(crate) open_eval_seen: FxHashSet<ExprPtr<'t>>,
     pub(crate) bvar_hc: FxHashMap<(u32, usize), V<'a>>,
@@ -1114,11 +1130,17 @@ impl<'a, 't> TcCache<'a, 't> {
             const_head_type_cache: session_small_fx_hash_map(),
             const_head_value_cache: session_small_fx_hash_map(),
             const_result_level_cache: small_fx_hash_map(),
-            conv_cache: session_fx_hash_set(),
+            conv_cache: session_small_fx_hash_set(),
             conv_cache_neg: session_small_fx_hash_set(),
             conv_cache_neg_probe: small_fx_hash_set(),
             probe_depth: 0,
             closed_eval_cache: session_small_fx_hash_map(),
+            whnf_store: new_fx_hash_map(),
+            whnf_store_filter: Box::new([0u64; 1024]),
+            whnf_head_filter: Box::new([0u64; 1024]),
+            whnf_admit: vec![0u8; WHNF_ADMIT_LEN].into_boxed_slice().try_into().expect("admit table size"),
+            lam_domain_cache: session_small_fx_hash_map(),
+            global_value_cache: session_fx_hash_map(),
             open_eval_cache: session_fx_hash_map(),
             open_eval_seen: small_fx_hash_set(),
             bvar_hc: session_small_fx_hash_map(),
@@ -1179,6 +1201,8 @@ impl<'a, 't> TcCache<'a, 't> {
         self.fvar_cache.clear();
         self.ind_occ_cache.clear();
         self.closed_eval_cache.clear();
+        self.lam_domain_cache.clear();
+        self.global_value_cache.clear();
     }
 
     pub(crate) fn clear_session(&mut self) {
@@ -1218,6 +1242,8 @@ impl<'a, 't> TcCache<'a, 't> {
         shrink_map(&mut self.fvar_cache);
         shrink_map(&mut self.ind_occ_cache);
         shrink_map(&mut self.closed_eval_cache);
+        shrink_map(&mut self.lam_domain_cache);
+        shrink_map(&mut self.global_value_cache);
     }
 }
 
@@ -1248,7 +1274,9 @@ impl SessionBump {
 
     pub(crate) fn allocated_bytes(&self) -> usize { self.inner.allocated_bytes() }
 
-    pub(crate) fn get<'a>(&self) -> &'a bumpalo::Bump { unsafe { &*(&self.inner as *const bumpalo::Bump) } }
+    pub(crate) fn get<'a>(&self) -> &'a bumpalo::Bump {
+        unsafe { &*(&self.inner as *const bumpalo::Bump) }
+    }
 
     pub(crate) fn reset(&mut self) { self.inner = bumpalo::Bump::new() }
 }
@@ -1416,4 +1444,17 @@ impl Config {
 struct ExitStatus {
     tc_err: Option<String>,
     pp_err: Option<String>,
+}
+
+pub(crate) const WHNF_ADMIT_LEN: usize = 1 << 22;
+
+#[inline]
+pub(crate) fn admit_slot(k: u64) -> usize {
+    (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 42) as usize
+}
+
+#[inline]
+pub(crate) fn tenure_slot(k: usize) -> (usize, u64) {
+    let h = (k as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 16;
+    (((h >> 6) as usize) & 1023, 1u64 << (h & 63))
 }

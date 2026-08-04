@@ -30,7 +30,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
 
     pub(crate) fn ensure_sort_v(&mut self, depth: u32, v: V<'t>) -> LevelPtr<'t> {
         match self.force_all(depth, v) {
-            Value::Sort { level } => *level,
+            Value::Sort { level , .. } => *level,
             _ => panic!("expected a sort"),
         }
     }
