@@ -241,14 +241,22 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn leq(&mut self, l: LevelPtr<'t>, r: LevelPtr<'t>) -> bool {
+        if l == r {
+            return true
+        }
         let l_prime = self.simplify(l);
         let r_prime = self.simplify(r);
         self.leq_core(l_prime, r_prime, 0)
     }
 
-    pub fn eq_antisymm(&mut self, l: LevelPtr<'t>, r: LevelPtr<'t>) -> bool { self.leq(l, r) && self.leq(r, l) }
+    pub fn eq_antisymm(&mut self, l: LevelPtr<'t>, r: LevelPtr<'t>) -> bool {
+        l == r || (self.leq(l, r) && self.leq(r, l))
+    }
 
     pub fn eq_antisymm_many(&mut self, xs: LevelsPtr<'t>, ys: LevelsPtr<'t>) -> bool {
+        if xs == ys {
+            return true
+        }
         let xs = self.read_levels(xs);
         let ys = self.read_levels(ys);
         if xs.len() != ys.len() {
