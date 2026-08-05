@@ -191,7 +191,13 @@ impl<'a> ExprPtr<'a> {
     }
 
     #[inline]
-    pub(crate) fn global(r: &'a Expr<'a>) -> Self { Self::pack(r, 0) }
+    pub(crate) fn global(r: &'a Expr<'a>, num_loose_bvars: u16) -> Self {
+        let addr = r as *const Expr<'a> as usize as u64;
+        debug_assert!(addr & !EXPR_ADDR_MASK == 0);
+        debug_assert_eq!(num_loose_bvars, r.num_loose_bvars());
+        let bits = addr | (u64::from(num_loose_bvars) << EXPR_BVAR_SHIFT);
+        Self { bits: unsafe { std::num::NonZeroU64::new_unchecked(bits) }, _ph: PhantomData }
+    }
 
     #[inline]
     pub(crate) fn local(r: &'a Expr<'a>) -> Self { Self::pack(r, EXPR_LOCAL_BIT) }
@@ -366,6 +372,8 @@ pub(crate) struct NameInterner<'a> {
 impl<'a> NameInterner<'a> {
     fn new() -> Self { Self { table: HashTable::new() } }
 
+    fn with_capacity(cap: usize) -> Self { Self { table: HashTable::with_capacity(cap) } }
+
     pub(crate) fn get<'b>(&self, v: &Name<'b>) -> Option<&'a crate::name::NameNode<'a>>
     where
         'a: 'b, {
@@ -460,13 +468,13 @@ pub struct Dag<'a> {
 }
 
 impl<'a> Dag<'a> {
-    pub(crate) fn new(config: &Config) -> Self {
+    pub(crate) fn new(config: &Config, input_len: usize) -> Self {
         Self {
-            names: NameInterner::new(),
+            names: NameInterner::with_capacity(input_len / 1024 + 16),
             levels: LevelInterner::new(),
             exprs: ExprInterner::new(),
             uparams: LevelsInterner::new(),
-            strings: StringInterner::new(),
+            strings: StringInterner::with_capacity(input_len / 16384 + 16),
             bignums: if config.nat_extension { Some(BigUintInterner::new()) } else { None },
         }
     }

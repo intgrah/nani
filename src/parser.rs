@@ -40,14 +40,13 @@ fn check_semver<'a>(meta: &FileMeta<'a>) -> Result<(), Box<dyn Error>> {
 
 pub struct Parser<'a, R: BufRead> {
     buf_reader: R,
-    line_num: usize,
     arena: &'a ArenaRef<'a>,
     dag: Dag<'a>,
     anon: NamePtr<'a>,
     zero: LevelPtr<'a>,
     names_by_idx: Vec<Option<NamePtr<'a>>>,
     levels_by_idx: Vec<Option<LevelPtr<'a>>>,
-    exprs_by_idx: Vec<Option<ExprPtr<'a>>>,
+    exprs_by_idx: Vec<ExprEntry<'a>>,
     declars: FxIndexMap<NamePtr<'a>, Declar<'a>>,
     notations: FxHashMap<NamePtr<'a>, Notation<'a>>,
     config: Config,
@@ -377,10 +376,8 @@ struct Fallback;
 const DIGIT_BIAS: u64 = 0x3030_3030_3030_3030;
 
 #[inline(always)]
-fn digit_run(chunk: u64) -> u8 {
-    let below = chunk.wrapping_sub(DIGIT_BIAS) & !chunk;
-    let above = chunk.wrapping_add(0x4646_4646_4646_4646);
-    let non_digit = (below | above) & 0x8080_8080_8080_8080;
+fn digit_run(unbiased: u64) -> u8 {
+    let non_digit = (unbiased.wrapping_add(0x7676_7676_7676_7676) | unbiased) & 0x8080_8080_8080_8080;
     if non_digit == 0 {
         8
     } else {
@@ -389,8 +386,8 @@ fn digit_run(chunk: u64) -> u8 {
 }
 
 #[inline(always)]
-fn packed_digits(chunk: u64, run: u8) -> u64 {
-    let v = (chunk.wrapping_sub(DIGIT_BIAS)) << ((8 - u32::from(run)) * 8);
+fn packed_digits(unbiased: u64, run: u8) -> u64 {
+    let v = unbiased << ((8 - u32::from(run)) * 8);
     let x = v.wrapping_mul(10).wrapping_add(v >> 8);
     const MASK: u64 = 0x0000_00FF_0000_00FF;
     const MUL1: u64 = 0x000F_4240_0000_0064;
@@ -422,9 +419,13 @@ fn find_newline(s: &[u8]) -> Option<usize> {
     None
 }
 
+const POW10: [u64; 8] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
 struct Cur<'s> {
     s: &'s [u8],
+    lim: isize,
     i: usize,
+    next: usize,
 }
 
 impl<'s> Cur<'s> {
@@ -442,32 +443,30 @@ impl<'s> Cur<'s> {
 
     #[inline(always)]
     fn uint(&mut self) -> Result<u64, Fallback> {
-        if self.i + 8 <= self.s.len() {
-            let chunk = u64::from_le_bytes(self.s[self.i..self.i + 8].try_into().unwrap());
-            let run = digit_run(chunk);
-            if run > 0 && run < 8 {
+        if self.i as isize <= self.lim {
+            let x = u64::from_le_bytes(self.s[self.i..self.i + 8].try_into().unwrap()) ^ DIGIT_BIAS;
+            let run = digit_run(x);
+            if run == 0 {
+                return Err(Fallback)
+            }
+            if run < 8 {
                 self.i += usize::from(run);
-                return Ok(packed_digits(chunk, run))
+                return Ok(packed_digits(x, run))
+            }
+            let hi = packed_digits(x, 8);
+            if self.s[self.i + 8].wrapping_sub(b'0') > 9 {
+                self.i += 8;
+                return Ok(hi)
+            }
+            let x = u64::from_le_bytes(self.s[self.i + 8..self.i + 16].try_into().unwrap()) ^ DIGIT_BIAS;
+            let run = digit_run(x);
+            if run < 8 {
+                self.i += 8 + usize::from(run);
+                return Ok(hi * POW10[usize::from(run)] + packed_digits(x, run))
             }
         }
-        self.uint_slow()
-    }
-
-    #[inline(never)]
-    fn uint_slow(&mut self) -> Result<u64, Fallback> {
-        let start = self.i;
-        let mut x = 0u64;
-        while self.i < self.s.len() {
-            let d = self.s[self.i].wrapping_sub(b'0');
-            if d > 9 {
-                break
-            }
-            x = x * 10 + u64::from(d);
-            self.i += 1;
-        }
-        if self.i == start || self.i - start > 19 {
-            return Err(Fallback)
-        }
+        let (x, i) = uint_slow(self.s, self.i)?;
+        self.i = i;
         Ok(x)
     }
 
@@ -491,7 +490,7 @@ impl<'s> Cur<'s> {
                     self.i += 1;
                     return Ok(r)
                 }
-                b'\\' => return Err(Fallback),
+                b'\\' | b'\n' => return Err(Fallback),
                 _ => self.i += 1,
             }
         }
@@ -516,6 +515,7 @@ impl<'s> Cur<'s> {
 
     #[inline]
     fn u32_array(&mut self, out: &mut Vec<u32>) -> Result<(), Fallback> {
+        out.clear();
         self.lit(b"[")?;
         if self.peek(0)? == b']' {
             self.i += 1;
@@ -596,13 +596,85 @@ impl<'s> Cur<'s> {
     }
 
     #[inline(always)]
-    fn done(&self) -> Result<(), Fallback> {
-        if self.i == self.s.len() {
-            Ok(())
-        } else {
-            Err(Fallback)
+    fn close(&mut self, l: &[u8]) -> Result<(), Fallback> {
+        if self.s.len() - self.i > l.len()
+            && &self.s[self.i..self.i + l.len()] == l
+            && self.s[self.i + l.len()] == b'\n'
+        {
+            self.i += l.len() + 1;
+            self.next = self.i;
+            return Ok(())
+        }
+        self.lit(l)?;
+        self.done()
+    }
+
+    #[inline(always)]
+    fn done(&mut self) -> Result<(), Fallback> {
+        self.next = match self.s.get(self.i) {
+            None => self.i,
+            Some(b'\n') => self.i + 1,
+            Some(c) if c.is_ascii_whitespace() => eol_slow(self.s, self.i)?,
+            Some(_) => return Err(Fallback),
+        };
+        Ok(())
+    }
+}
+
+#[inline(never)]
+fn uint_slow(s: &[u8], mut i: usize) -> Result<(u64, usize), Fallback> {
+    let start = i;
+    let mut x = 0u64;
+    while i < s.len() {
+        let d = s[i].wrapping_sub(b'0');
+        if d > 9 {
+            break
+        }
+        x = x * 10 + u64::from(d);
+        i += 1;
+    }
+    if i == start || i - start > 19 {
+        return Err(Fallback)
+    }
+    Ok((x, i))
+}
+
+#[inline(never)]
+fn eol_slow(s: &[u8], mut i: usize) -> Result<usize, Fallback> {
+    while let Some(&c) = s.get(i) {
+        match c {
+            b'\n' => return Ok(i + 1),
+            c if c.is_ascii_whitespace() => i += 1,
+            _ => return Err(Fallback),
         }
     }
+    Ok(i)
+}
+
+#[derive(Clone, Copy)]
+struct ExprEntry<'a> {
+    ptr: Option<ExprPtr<'a>>,
+    child_mask: u64,
+}
+
+const NO_EXPR: ExprEntry<'static> = ExprEntry { ptr: None, child_mask: 0 };
+
+#[cold]
+#[inline(never)]
+fn undefined_index(kind: &str, idx: u32) -> ! {
+    panic!("export references {kind} index {idx} before it is defined")
+}
+
+#[inline(always)]
+fn put_at<T: Copy>(v: &mut Vec<Option<T>>, i: usize, x: T) {
+    if i == v.len() {
+        v.push(Some(x));
+        return
+    }
+    if i > v.len() {
+        v.resize(i + 1, None);
+    }
+    v[i] = Some(x);
 }
 
 enum FastError {
@@ -620,7 +692,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     pub fn with_input_len(arena: &'a ArenaRef<'a>, buf_reader: R, config: Config, input_len: usize) -> Self {
-        let mut dag = Dag::new(&config);
+        let mut dag = Dag::new(&config, input_len);
         let anon = NamePtr::global(dag.names.intern(arena, Name::Anon));
         let zero = LevelPtr::global(dag.levels.intern(arena, Level::Zero));
         let mut names_by_idx = Vec::with_capacity(input_len / 128 + 1);
@@ -629,14 +701,13 @@ impl<'a, R: BufRead> Parser<'a, R> {
         levels_by_idx.push(Some(zero));
         Self {
             buf_reader,
-            line_num: 0usize,
             arena,
             dag,
             anon,
             zero,
             names_by_idx,
             levels_by_idx,
-            exprs_by_idx: Vec::with_capacity(input_len / 24),
+            exprs_by_idx: Vec::with_capacity(input_len / 48),
             declars: new_fx_index_map(),
             notations: new_fx_hash_map(),
             config,
@@ -657,11 +728,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
             panic!("Attempted to insert duplicate Name");
         }
         let ptr = NamePtr::global(self.dag.names.insert(self.arena, n));
-        let i = expected.index() as usize;
-        if i >= self.names_by_idx.len() {
-            self.names_by_idx.resize(i + 1, None);
-        }
-        self.names_by_idx[i] = Some(ptr);
+        put_at(&mut self.names_by_idx, expected.index() as usize, ptr);
     }
 
     fn push_level(&mut self, expected: BackRef, l: Level<'a>) {
@@ -669,21 +736,27 @@ impl<'a, R: BufRead> Parser<'a, R> {
             panic!("Attempted to insert duplicate Level");
         }
         let ptr = LevelPtr::global(self.dag.levels.insert(self.arena, l));
-        let i = expected.index() as usize;
-        if i >= self.levels_by_idx.len() {
-            self.levels_by_idx.resize(i + 1, None);
-        }
-        self.levels_by_idx[i] = Some(ptr);
+        put_at(&mut self.levels_by_idx, expected.index() as usize, ptr);
     }
 
-    fn push_expr(&mut self, expected: BackRef, e: Expr<'a>) {
+    #[inline(always)]
+    fn push_expr(&mut self, expected: BackRef, e: Expr<'a>, num_loose_bvars: u16, fv_mask: u64) {
         let r: &'a Expr<'a> = self.arena.alloc(e);
-        let ptr = ExprPtr::global(r);
+        let ptr = ExprPtr::global(r, num_loose_bvars);
+        let entry = ExprEntry {
+            ptr: Some(ptr),
+            child_mask: if num_loose_bvars > 64 { 0 } else { fv_mask },
+        };
+        debug_assert_eq!(entry.child_mask, crate::expr::child_mask(ptr));
         let i = expected.index() as usize;
-        if i >= self.exprs_by_idx.len() {
-            self.exprs_by_idx.resize(i + 1, None);
+        if i == self.exprs_by_idx.len() {
+            self.exprs_by_idx.push(entry);
+            return
         }
-        self.exprs_by_idx[i] = Some(ptr);
+        if i > self.exprs_by_idx.len() {
+            self.exprs_by_idx.resize(i + 1, NO_EXPR);
+        }
+        self.exprs_by_idx[i] = entry;
     }
 
     fn axiom_permitted(&self, n: NamePtr<'a>) -> bool {
@@ -698,13 +771,17 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> {
-        self.names_by_idx.get(idx as usize).copied().flatten()
-            .unwrap_or_else(|| panic!("export references name index {idx} before it is defined"))
+        match self.names_by_idx.get(idx as usize).copied().flatten() {
+            Some(p) => p,
+            None => undefined_index("name", idx),
+        }
     }
 
     fn get_level_ptr(&self, idx: u32) -> LevelPtr<'a> {
-        self.levels_by_idx.get(idx as usize).copied().flatten()
-            .unwrap_or_else(|| panic!("export references level index {idx} before it is defined"))
+        match self.levels_by_idx.get(idx as usize).copied().flatten() {
+            Some(p) => p,
+            None => undefined_index("level", idx),
+        }
     }
 
     fn get_names(&self, idxs: &[u32]) -> Vec<NamePtr<'a>> {
@@ -727,9 +804,19 @@ impl<'a, R: BufRead> Parser<'a, R> {
         LevelsPtr::global(self.dag.uparams.intern(self.arena, &levels))
     }
 
-    fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
-        self.exprs_by_idx.get(idx as usize).copied().flatten()
-            .unwrap_or_else(|| panic!("export references expression index {idx} before it is defined"))
+    fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> { self.get_expr(idx).0 }
+
+    fn get_expr(&self, idx: u32) -> (ExprPtr<'a>, u64) {
+        match self.exprs_by_idx.get(idx as usize) {
+            Some(&ExprEntry { ptr: Some(p), child_mask }) => (p, child_mask),
+            _ => undefined_index("expression", idx),
+        }
+    }
+
+    #[inline(always)]
+    fn get_body(&self, idx: u32) -> (ExprPtr<'a>, u64) {
+        let (p, child_mask) = self.get_expr(idx);
+        (p, if p.num_loose_bvars() > 64 { u64::MAX } else { child_mask >> 1 })
     }
 
     fn name_to_string(&self, n: NamePtr<'a>) -> String {
@@ -752,38 +839,36 @@ impl<'a, R: BufRead> Parser<'a, R> {
         }
     }
 
-    fn go1(&mut self, line: &[u8]) -> Result<(), Box<dyn Error>> {
-        let mut trimmed = line;
-        while let [rest @ .., last] = trimmed {
-            if !last.is_ascii_whitespace() {
-                break
-            }
-            trimmed = rest;
-        }
+    #[inline(never)]
+    fn slow_line(&mut self, input: &[u8], pos: usize) -> Result<usize, Box<dyn Error>> {
+        let end = match find_newline(&input[pos..]) {
+            Some(i) => pos + i + 1,
+            None => input.len(),
+        };
+        let line = std::str::from_utf8(&input[pos..end])?;
+        self.go1_general(line)?;
+        Ok(end)
+    }
+
+    #[inline(never)]
+    fn run_over(&mut self, input: &[u8]) -> Result<(), Box<dyn Error>> {
         let mut idxs = std::mem::take(&mut self.scratch_idxs);
-        idxs.clear();
-        let out = match self.fast_line(trimmed, &mut idxs) {
-            Ok(()) => Ok(()),
-            Err(FastError::Failed(e)) => Err(e),
-            Err(FastError::Fallback) =>
-                std::str::from_utf8(line).map_err(Box::<dyn Error>::from).and_then(|s| self.go1_general(s)),
+        let mut pos = 0;
+        let out = loop {
+            if pos >= input.len() {
+                break Ok(())
+            }
+            pos = match self.fast_line(input, pos, &mut idxs) {
+                Ok(next) => next,
+                Err(FastError::Failed(e)) => break Err(e),
+                Err(FastError::Fallback) => match self.slow_line(input, pos) {
+                    Ok(next) => next,
+                    Err(e) => break Err(e),
+                },
+            };
         };
         self.scratch_idxs = idxs;
         out
-    }
-
-    fn run_over(&mut self, input: &[u8]) -> Result<(), Box<dyn Error>> {
-        let mut pos = 0;
-        while pos < input.len() {
-            let end = match find_newline(&input[pos..]) {
-                Some(i) => pos + i + 1,
-                None => input.len(),
-            };
-            self.go1(&input[pos..end])?;
-            self.line_num += 1;
-            pos = end;
-        }
-        Ok(())
     }
 
     fn finish(self) -> Result<(crate::util::ExportFile<'a>, Vec<String>), Box<dyn Error>> {
@@ -819,13 +904,37 @@ impl<'a, R: BufRead> Parser<'a, R> {
         Ok((export_file, self.skipped))
     }
 
-    fn fast_line(&mut self, s: &[u8], idxs: &mut Vec<u32>) -> Result<(), FastError> {
-        if s.len() < 8 {
+    fn fast_line(&mut self, s: &[u8], pos: usize, idxs: &mut Vec<u32>) -> Result<usize, FastError> {
+        if s.len() - pos < 8 {
             return Err(FastError::Fallback)
         }
-        let mut c = Cur { s, i: 0 };
-        match s[2] {
-            b'i' => match s[3] {
+        let lim = s.len() as isize - 16;
+        if s[pos + 2] != b'a' {
+            return self.other_line(s, lim, pos, idxs)
+        }
+        let mut c = Cur { s, lim, i: pos, next: 0 };
+        c.lit(b"{\"app\":{\"arg\":")?;
+        let arg = c.uint_u32()?;
+        c.lit(b",\"fn\":")?;
+        let fun = c.uint_u32()?;
+        c.lit(b"},\"ie\":")?;
+        let i = c.uint_u32()?;
+        c.close(b"}")?;
+        self.do_app(BackRef::Ie(i), fun, arg);
+        Ok(c.next)
+    }
+
+    #[inline(never)]
+    fn other_line(&mut self, s: &[u8], lim: isize, pos: usize, idxs: &mut Vec<u32>) -> Result<usize, FastError> {
+        let mut c = Cur { s, lim, i: pos, next: 0 };
+        self.fast_body(&mut c, idxs)?;
+        Ok(c.next)
+    }
+
+    #[inline(always)]
+    fn fast_body(&mut self, c: &mut Cur<'_>, idxs: &mut Vec<u32>) -> Result<(), FastError> {
+        match c.s[c.i + 2] {
+            b'i' => match c.s[c.i + 3] {
                 b'e' => {
                     c.lit(b"{\"ie\":")?;
                     let i = c.uint_u32()?;
@@ -841,8 +950,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                                 let binder_name = c.uint_u32()?;
                                 c.lit(b",\"type\":")?;
                                 let binder_type = c.uint_u32()?;
-                                c.lit(b"}}")?;
-                                c.done()?;
+                                c.close(b"}}")?;
                                 Ok(self.do_lambda(BackRef::Ie(i), binder_name, binder_type, body, style))
                             }
                             b'e' => {
@@ -856,8 +964,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                                 let binder_type = c.uint_u32()?;
                                 c.lit(b",\"value\":")?;
                                 let val = c.uint_u32()?;
-                                c.lit(b"}}")?;
-                                c.done()?;
+                                c.close(b"}}")?;
                                 Ok(self.do_let(BackRef::Ie(i), binder_name, binder_type, val, body, nondep))
                             }
                             _ => Err(FastError::Fallback),
@@ -865,8 +972,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         b'n' => {
                             c.lit(b"natVal\":")?;
                             let digits = c.quoted()?;
-                            c.lit(b"}")?;
-                            c.done()?;
+                            c.close(b"}")?;
                             let big = BigUint::parse_bytes(digits, 10).ok_or_else(|| {
                                 FastError::Failed(Box::from("invalid BigUint decimal string".to_string()))
                             })?;
@@ -879,23 +985,20 @@ impl<'a, R: BufRead> Parser<'a, R> {
                             let structure = c.uint_u32()?;
                             c.lit(b",\"typeName\":")?;
                             let ty_name = c.uint_u32()?;
-                            c.lit(b"}}")?;
-                            c.done()?;
+                            c.close(b"}}")?;
                             Ok(self.do_proj(BackRef::Ie(i), ty_name, idx, structure))
                         }
                         b's' => match c.peek(1)? {
                             b'o' => {
                                 c.lit(b"sort\":")?;
                                 let level = c.uint_u32()?;
-                                c.lit(b"}")?;
-                                c.done()?;
+                                c.close(b"}")?;
                                 Ok(self.do_sort(BackRef::Ie(i), level))
                             }
                             b't' => {
                                 c.lit(b"strVal\":")?;
                                 let string = c.quoted_str()?;
-                                c.lit(b"}")?;
-                                c.done()?;
+                                c.close(b"}")?;
                                 self.do_str_lit(BackRef::Ie(i), string).map_err(FastError::Failed)
                             }
                             _ => Err(FastError::Fallback),
@@ -913,8 +1016,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                             let l = c.uint_u32()?;
                             c.lit(b",")?;
                             let r = c.uint_u32()?;
-                            c.lit(b"]}")?;
-                            c.done()?;
+                            c.close(b"]}")?;
                             Ok(self.do_imax(BackRef::Il(i), l, r))
                         }
                         b'm' => {
@@ -922,22 +1024,19 @@ impl<'a, R: BufRead> Parser<'a, R> {
                             let l = c.uint_u32()?;
                             c.lit(b",")?;
                             let r = c.uint_u32()?;
-                            c.lit(b"]}")?;
-                            c.done()?;
+                            c.close(b"]}")?;
                             Ok(self.do_max(BackRef::Il(i), l, r))
                         }
                         b'p' => {
                             c.lit(b"param\":")?;
                             let n = c.uint_u32()?;
-                            c.lit(b"}")?;
-                            c.done()?;
+                            c.close(b"}")?;
                             Ok(self.do_level_param(BackRef::Il(i), n))
                         }
                         b's' => {
                             c.lit(b"succ\":")?;
                             let l = c.uint_u32()?;
-                            c.lit(b"}")?;
-                            c.done()?;
+                            c.close(b"}")?;
                             Ok(self.do_succ(BackRef::Il(i), l))
                         }
                         _ => Err(FastError::Fallback),
@@ -953,8 +1052,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                             let n = c.uint_u32()?;
                             c.lit(b",\"pre\":")?;
                             let pre = c.uint_u32()?;
-                            c.lit(b"}}")?;
-                            c.done()?;
+                            c.close(b"}}")?;
                             Ok(self.do_name_num(BackRef::In(i), pre, u64::from(n)))
                         }
                         b's' => {
@@ -962,8 +1060,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                             let pre = c.uint_u32()?;
                             c.lit(b",\"str\":")?;
                             let string = c.quoted_str()?;
-                            c.lit(b"}}")?;
-                            c.done()?;
+                            c.close(b"}}")?;
                             Ok(self.do_name_str(BackRef::In(i), pre, string))
                         }
                         _ => Err(FastError::Fallback),
@@ -971,24 +1068,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 }
                 _ => Err(FastError::Fallback),
             },
-            b'a' => {
-                c.lit(b"{\"app\":{\"arg\":")?;
-                let arg = c.uint_u32()?;
-                c.lit(b",\"fn\":")?;
-                let fun = c.uint_u32()?;
-                c.lit(b"},\"ie\":")?;
-                let i = c.uint_u32()?;
-                c.lit(b"}")?;
-                c.done()?;
-                Ok(self.do_app(BackRef::Ie(i), fun, arg))
-            }
             b'b' => {
                 c.lit(b"{\"bvar\":")?;
                 let dbj_idx = c.uint_u16()?;
                 c.lit(b",\"ie\":")?;
                 let i = c.uint_u32()?;
-                c.lit(b"}")?;
-                c.done()?;
+                c.close(b"}")?;
                 self.do_bvar(BackRef::Ie(i), dbj_idx).map_err(FastError::Failed)
             }
             b'c' => {
@@ -998,8 +1083,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 c.u32_array(idxs)?;
                 c.lit(b"},\"ie\":")?;
                 let i = c.uint_u32()?;
-                c.lit(b"}")?;
-                c.done()?;
+                c.close(b"}")?;
                 Ok(self.do_const(BackRef::Ie(i), name, idxs))
             }
             b'd' => {
@@ -1015,8 +1099,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let ty = c.uint_u32()?;
                 c.lit(b",\"value\":")?;
                 let val = c.uint_u32()?;
-                c.lit(b"}}")?;
-                c.done()?;
+                c.close(b"}}")?;
                 Ok(self.do_def(name, ty, val, idxs, hint))
             }
             b'f' => {
@@ -1030,8 +1113,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let binder_type = c.uint_u32()?;
                 c.lit(b"},\"ie\":")?;
                 let i = c.uint_u32()?;
-                c.lit(b"}")?;
-                c.done()?;
+                c.close(b"}")?;
                 Ok(self.do_pi(BackRef::Ie(i), binder_name, binder_type, body, style))
             }
             b't' => {
@@ -1045,8 +1127,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let ty = c.uint_u32()?;
                 c.lit(b",\"value\":")?;
                 let val = c.uint_u32()?;
-                c.lit(b"}}")?;
-                c.done()?;
+                c.close(b"}}")?;
                 Ok(self.do_thm(name, ty, val, idxs))
             }
             _ => Err(FastError::Fallback),
@@ -1054,9 +1135,18 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     #[inline]
+    fn intern_str(&mut self, s: &str) -> StringPtr<'a> {
+        if let Some(r) = self.dag.strings.get_str(s) {
+            return StringPtr::global(r)
+        }
+        let owned = Cow::Borrowed(&*self.arena.alloc_str(s));
+        StringPtr::global(self.dag.strings.insert(self.arena, owned))
+    }
+
+    #[inline]
     fn do_name_str(&mut self, idx: BackRef, pre: u32, s: &str) {
         let pfx = self.get_name_ptr(pre);
-        let sfx = StringPtr::global(self.dag.strings.intern(self.arena, Cow::Owned(s.to_string())));
+        let sfx = self.intern_str(s);
         let hash = hash64!(crate::name::STR_HASH, pfx, sfx);
         self.push_name(idx, Name::Str(pfx, sfx, hash));
     }
@@ -1077,7 +1167,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
         }
         let num_ptr = BigUintPtr::global(self.dag.bignums.as_mut().unwrap().intern(self.arena, big_uint));
         let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-        self.push_expr(idx, Expr::NatLit { ptr: num_ptr, hash });
+        self.push_expr(idx, Expr::NatLit { ptr: num_ptr, hash }, 0, 0);
         Ok(())
     }
 
@@ -1088,9 +1178,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 "String lit extension disallowed by checker execution config, but export file contains a string literal",
             );
         }
-        let string_ptr = StringPtr::global(self.dag.strings.intern(self.arena, crate::util::CowStr::Owned(s.to_string())));
+        let string_ptr = self.intern_str(s);
         let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-        self.push_expr(idx, Expr::StringLit { ptr: string_ptr, hash });
+        self.push_expr(idx, Expr::StringLit { ptr: string_ptr, hash }, 0, 0);
         Ok(())
     }
 
@@ -1128,7 +1218,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
     fn do_sort(&mut self, idx: BackRef, level: u32) {
         let level = self.get_level_ptr(level);
         let hash = hash64!(crate::expr::SORT_HASH, level);
-        self.push_expr(idx, Expr::Sort { level, hash });
+        self.push_expr(idx, Expr::Sort { level, hash }, 0, 0);
     }
 
     #[inline]
@@ -1136,16 +1226,17 @@ impl<'a, R: BufRead> Parser<'a, R> {
         let name = self.get_name_ptr(name);
         let levels = self.get_levels_ptr(us);
         let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-        self.push_expr(idx, Expr::Const { name, levels, hash });
+        self.push_expr(idx, Expr::Const { name, levels, hash }, 0, 0);
     }
 
     #[inline]
     fn do_app(&mut self, idx: BackRef, fun: u32, arg: u32) {
-        let fun = self.get_expr_ptr(fun);
-        let arg = self.get_expr_ptr(arg);
+        let (fun, fun_mask) = self.get_expr(fun);
+        let (arg, arg_mask) = self.get_expr(arg);
         let hash = hash64!(crate::expr::APP_HASH, fun, arg);
-        let fv_mask = crate::expr::child_mask(fun) | crate::expr::child_mask(arg);
-        self.push_expr(idx, Expr::App { fun, arg, fv_mask, hash });
+        let fv_mask = fun_mask | arg_mask;
+        let nlb = fun.num_loose_bvars().max(arg.num_loose_bvars());
+        self.push_expr(idx, Expr::App { fun, arg, fv_mask, hash }, nlb, fv_mask);
     }
 
     #[inline]
@@ -1154,64 +1245,62 @@ impl<'a, R: BufRead> Parser<'a, R> {
             return crate::util::decline("bvar index exceeds implementation limit")
         }
         let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-        self.push_expr(idx, Expr::Var { dbj_idx, hash });
+        let fv_mask = if dbj_idx < 64 { 1u64 << dbj_idx } else { 0 };
+        self.push_expr(idx, Expr::Var { dbj_idx, hash }, dbj_idx + 1, fv_mask);
         Ok(())
     }
 
     #[inline]
     fn do_lambda(&mut self, idx: BackRef, binder_name: u32, binder_type: u32, body: u32, binder_info: BinderStyle) {
         let binder_name = self.get_name_ptr(binder_name);
-        let binder_type = self.get_expr_ptr(binder_type);
-        let body = self.get_expr_ptr(body);
+        let (binder_type, binder_type_mask) = self.get_expr(binder_type);
+        let (body, body_mask) = self.get_body(body);
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, binder_type, body);
+        let fv_mask = binder_type_mask | body_mask;
+        let nlb = binder_type.num_loose_bvars().max(body.num_loose_bvars().saturating_sub(1));
         self.push_expr(
             idx,
-            Expr::Lambda {
-                binder_name,
-                binder_style: binder_info,
-                binder_type,
-                body,
-                fv_mask: crate::expr::child_mask(binder_type) | crate::expr::body_mask(body),
-                hash,
-            },
+            Expr::Lambda { binder_name, binder_style: binder_info, binder_type, body, fv_mask, hash },
+            nlb,
+            fv_mask,
         );
     }
 
     #[inline]
     fn do_pi(&mut self, idx: BackRef, binder_name: u32, binder_type: u32, body: u32, binder_info: BinderStyle) {
         let binder_name = self.get_name_ptr(binder_name);
-        let binder_type = self.get_expr_ptr(binder_type);
-        let body = self.get_expr_ptr(body);
+        let (binder_type, binder_type_mask) = self.get_expr(binder_type);
+        let (body, body_mask) = self.get_body(body);
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, binder_type, body);
+        let fv_mask = binder_type_mask | body_mask;
+        let nlb = binder_type.num_loose_bvars().max(body.num_loose_bvars().saturating_sub(1));
         self.push_expr(
             idx,
-            Expr::Pi {
-                binder_name,
-                binder_style: binder_info,
-                binder_type,
-                body,
-                fv_mask: crate::expr::child_mask(binder_type) | crate::expr::body_mask(body),
-                hash,
-            },
+            Expr::Pi { binder_name, binder_style: binder_info, binder_type, body, fv_mask, hash },
+            nlb,
+            fv_mask,
         );
     }
 
     #[inline]
     fn do_let(&mut self, idx: BackRef, name: u32, ty: u32, value: u32, body: u32, nondep: bool) {
         let binder_name = self.get_name_ptr(name);
-        let binder_type = self.get_expr_ptr(ty);
-        let val = self.get_expr_ptr(value);
-        let body = self.get_expr_ptr(body);
+        let (binder_type, binder_type_mask) = self.get_expr(ty);
+        let (val, val_mask) = self.get_expr(value);
+        let (body, body_mask) = self.get_body(body);
         let hash = hash64!(crate::expr::LET_HASH, binder_name, binder_type, val, body, nondep);
+        let fv_mask = binder_type_mask | val_mask | body_mask;
+        let nlb =
+            binder_type.num_loose_bvars().max(val.num_loose_bvars().max(body.num_loose_bvars().saturating_sub(1)));
         self.push_expr(
             idx,
             Expr::Let {
                 data: self.arena.alloc(crate::expr::LetData { binder_name, binder_type, val, body, nondep }),
-                fv_mask: crate::expr::child_mask(binder_type)
-                    | crate::expr::child_mask(val)
-                    | crate::expr::body_mask(body),
+                fv_mask,
                 hash,
             },
+            nlb,
+            fv_mask,
         );
     }
 
@@ -1219,17 +1308,13 @@ impl<'a, R: BufRead> Parser<'a, R> {
     fn do_proj(&mut self, idx: BackRef, type_name: u32, proj_idx: usize, struct_: u32) {
         let proj_idx = u16::try_from(proj_idx).expect("projection index does not fit in u16");
         let ty_name = self.get_name_ptr(type_name);
-        let structure = self.get_expr_ptr(struct_);
+        let (structure, fv_mask) = self.get_expr(struct_);
         let hash = hash64!(crate::expr::PROJ_HASH, ty_name, proj_idx, structure);
         self.push_expr(
             idx,
-            Expr::Proj {
-                ty_name,
-                idx: proj_idx,
-                structure,
-                fv_mask: crate::expr::child_mask(structure),
-                hash,
-            },
+            Expr::Proj { ty_name, idx: proj_idx, structure, fv_mask, hash },
+            structure.num_loose_bvars(),
+            fv_mask,
         );
     }
 
