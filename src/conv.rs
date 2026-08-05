@@ -403,6 +403,9 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn unify_spine<const RIGID: bool>(&mut self, depth: u32, sx: S<'t>, sy: S<'t>, sig: Sig, limit: u32) -> bool {
+        if std::ptr::eq(sx, sy) {
+            return true;
+        }
         match (sx, sy) {
             (Spine::Empty, Spine::Empty) => true,
             (Spine::Snoc { prev: pa, elim: ea, .. }, Spine::Snoc { prev: pb, elim: eb, .. }) => {
