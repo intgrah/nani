@@ -5,13 +5,10 @@ This is an experimental fork on top of:
 - [sonanoda](https://github.com/datokrat/sonanoda)
 - [still-nanoda](https://github.com/SchrodingerZhu/still-nanoda)
 
-This fork builds on still-nanoda. It replaces its conversion checking with
-normalisation by evaluation (NbE), as in
-[smalltt](https://github.com/AndrasKovacs/smalltt).
+It is essentially a testing bed for high-performance typechecking for Lean.
 
-## Current Change Set
+You shouldn't use this for serious purposes.
 
-1. Normalisation by evaluation: conversion checking is implemented by evaluating
-   each term into a value, instead of repeatedly WHNFing expressions. Constants applied to their arguments keep both their unreduced form and (lazily) the definition body, so two such terms are compared by head and arguments first, and the definition is unfolded only when inconclusive ("glued" evaluation).
+Currently, it is about 9x faster than the official kernel, measured on mathlib.
 
-   This change brings another 35% speedup in Mathlib. However it uses 40% more peak memory, probably due to the use of bump arena allocation.
+Basically, the core conversion algorithm is entirely replaced by something closure-based. There are also some non-theoretical, purely programming optimisations.
