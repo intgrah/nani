@@ -659,12 +659,21 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) arena: &'t ArenaRef<'t>,
     pub(crate) dag: Dag<'t>,
     pub(crate) expr_cache: ExprCache<'t>,
+    pub(crate) sig_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), crate::relevance::Sig>,
+    pub(crate) sig_computing: FxHashSet<(NamePtr<'t>, LevelsPtr<'t>)>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn new(export_file: &'t ExportFile<'p>, arena: &'t ArenaRef<'t>) -> Self {
         let dag = Dag::new_local(&export_file.config);
-        Self { export_file, arena, dag, expr_cache: ExprCache::new() }
+        Self {
+            export_file,
+            arena,
+            dag,
+            expr_cache: ExprCache::new(),
+            sig_cache: session_fx_hash_map(),
+            sig_computing: small_fx_hash_set(),
+        }
     }
 
     pub fn with_tc<F, A>(

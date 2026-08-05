@@ -336,7 +336,7 @@ pub enum Ctx<'a> {
 #[derive(Debug)]
 pub enum Spine<'a> {
     Empty,
-    Snoc { prev: S<'a>, elim: Elim<'a>, len: u32, canon: Cell<bool>, key: Cell<u64> },
+    Snoc { prev: S<'a>, elim: Elim<'a>, len: u32, canon: Cell<bool>, has_proj: bool, key: Cell<u64> },
 }
 
 impl<'a> Spine<'a> {
@@ -423,6 +423,14 @@ impl<'a> Ctx<'a> {
 }
 
 impl<'a> Spine<'a> {
+    #[inline]
+    pub fn has_proj(&self) -> bool {
+        match self {
+            Spine::Empty => false,
+            Spine::Snoc { has_proj, .. } => *has_proj,
+        }
+    }
+
     pub fn is_empty(&self) -> bool { matches!(self, Spine::Empty) }
 
     #[inline]
@@ -478,7 +486,14 @@ pub fn ctx_empty<'a>(arena: &'a Bump) -> C<'a> { arena.alloc(Ctx::Nil) }
 pub fn ctx_extend<'a>(arena: &'a Bump, parent: C<'a>, ty: V<'a>) -> C<'a> { arena.alloc(Ctx::Cons { ty, parent }) }
 pub fn spine_empty<'a>(arena: &'a Bump) -> S<'a> { arena.alloc(Spine::Empty) }
 pub fn spine_snoc<'a>(arena: &'a Bump, prev: S<'a>, elim: Elim<'a>) -> S<'a> {
-    arena.alloc(Spine::Snoc { prev, elim, len: prev.len() + 1, canon: Cell::new(false), key: Cell::new(0) })
+    arena.alloc(Spine::Snoc {
+        prev,
+        elim,
+        len: prev.len() + 1,
+        canon: Cell::new(false),
+        has_proj: prev.has_proj() || !elim.is_app(),
+        key: Cell::new(0),
+    })
 }
 
 pub fn mk_rigid<'a>(arena: &'a Bump, head: RigidHead<'a>, spine: S<'a>) -> V<'a> {
@@ -552,6 +567,7 @@ pub fn mk_thunk<'a>(arena: &'a Bump, env: E<'a>, expr: ExprPtr<'a>) -> V<'a> {
 }
 
 const _: () = assert!(std::mem::size_of::<Value<'static>>() == 56);
+const _: () = assert!(std::mem::size_of::<Spine<'static>>() == 32);
 
 pub fn forced_of<'a>(v: V<'a>) -> Option<V<'a>> {
     match v {

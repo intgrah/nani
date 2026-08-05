@@ -268,6 +268,8 @@ impl<'x, 'a: 'x> Env<'x, 'a> {
         self.temp_declars.as_ref().and_then(|ext| ext.get(n)).or_else(|| self.get_old_declar(n))
     }
 
+    pub fn has_temp_ext(&self) -> bool { self.temp_declars.is_some() }
+
     /// Get a declaration, only looking in the temporary extension.
     pub fn get_temp_declar(&self, n: &NamePtr<'a>) -> Option<&Declar<'a>> {
         self.temp_declars.as_ref().and_then(|ext| ext.get(n))
