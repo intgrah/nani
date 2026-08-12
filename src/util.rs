@@ -1105,6 +1105,8 @@ pub struct TcCache<'a, 't> {
     pub(crate) conv_cache_neg: FxHashSet<(usize, usize)>,
     pub(crate) conv_cache_neg_probe: FxHashSet<(usize, usize)>,
     pub(crate) probe_depth: u32,
+    pub(crate) probe_budget: u32,
+    pub(crate) probe_exhausted: bool,
     pub(crate) closed_eval_cache: FxHashMap<ExprPtr<'t>, V<'a>>,
     pub(crate) whnf_store: FxHashMap<u64, (u128, ExprPtr<'t>)>,
     pub(crate) whnf_store_filter: Box<[u64; 1024]>,
@@ -1151,6 +1153,8 @@ impl<'a, 't> TcCache<'a, 't> {
             conv_cache_neg: session_small_fx_hash_set(),
             conv_cache_neg_probe: small_fx_hash_set(),
             probe_depth: 0,
+            probe_budget: 0,
+            probe_exhausted: false,
             closed_eval_cache: session_small_fx_hash_map(),
             whnf_store: new_fx_hash_map(),
             whnf_store_filter: Box::new([0u64; 1024]),
@@ -1224,6 +1228,8 @@ impl<'a, 't> TcCache<'a, 't> {
 
     pub(crate) fn clear_session(&mut self) {
         self.probe_depth = 0;
+        self.probe_budget = 0;
+        self.probe_exhausted = false;
         shrink_map(&mut self.unfold_const_cache);
         shrink_map(&mut self.rec_rule_cache);
         shrink_map(&mut self.const_head_type_cache);

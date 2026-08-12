@@ -33,10 +33,24 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         self.conv_types_at(depth, vx, vy)
     }
 
-    pub(crate) fn conv_types_at(&mut self, depth: u32, a: V<'t>, b: V<'t>) -> bool { self.unify::<true>(depth, a, b) }
+    fn unbudgeted<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let depth = self.tc_cache.probe_depth;
+        let budget = self.tc_cache.probe_budget;
+        let exhausted = self.tc_cache.probe_exhausted;
+        self.tc_cache.probe_depth = 0;
+        let r = f(self);
+        self.tc_cache.probe_depth = depth;
+        self.tc_cache.probe_budget = budget;
+        self.tc_cache.probe_exhausted = exhausted;
+        r
+    }
+
+    pub(crate) fn conv_types_at(&mut self, depth: u32, a: V<'t>, b: V<'t>) -> bool {
+        self.unbudgeted(|s| s.unify::<true>(depth, a, b))
+    }
 
     pub(crate) fn def_eq_at(&mut self, depth: u32, vx: V<'t>, vy: V<'t>) -> bool {
-        self.try_proof_irrel_at(depth, vx, vy) || self.conv_types_at(depth, vx, vy)
+        self.unbudgeted(|s| s.try_proof_irrel_at(depth, vx, vy) || s.unify::<true>(depth, vx, vy))
     }
 
     #[inline]
@@ -93,17 +107,21 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                     return false;
                 }
                 if self.tc_cache.probe_depth > 0 && self.tc_cache.conv_cache_neg_probe.contains(&cache_key) {
+                    self.tc_cache.probe_exhausted = true;
                     return false;
                 }
             }
+            let outer = std::mem::replace(&mut self.tc_cache.probe_exhausted, false);
             let result = self.unify_no_cache::<RIGID>(depth, x, y);
+            let truncated = self.tc_cache.probe_exhausted;
+            self.tc_cache.probe_exhausted = outer | truncated;
             if result {
                 self.tc_cache.conv_uf.union(xa, ya);
             } else if RIGID && neg_eligible {
-                if self.tc_cache.probe_depth == 0 {
-                    self.tc_cache.conv_cache_neg.insert(cache_key);
-                } else {
+                if truncated {
                     self.tc_cache.conv_cache_neg_probe.insert(cache_key);
+                } else {
+                    self.tc_cache.conv_cache_neg.insert(cache_key);
                 }
             }
             result
@@ -112,7 +130,16 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
     }
 
+    const PROBE_CAP: u32 = 2048;
+
     fn unify_no_cache<const RIGID: bool>(&mut self, depth: u32, x: V<'t>, y: V<'t>) -> bool {
+        if self.tc_cache.probe_depth > 0 {
+            if self.tc_cache.probe_budget == 0 {
+                self.tc_cache.probe_exhausted = true;
+                return false;
+            }
+            self.tc_cache.probe_budget -= 1;
+        }
         let (t, t2) = (self.force_thunk(depth, x), self.force_thunk(depth, y));
         if let Some(r) = self.conv_nat::<RIGID>(depth, t, t2) {
             return r;
@@ -328,11 +355,69 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
     }
 
+    fn probe_pairs(&self, sx: S<'t>, sy: S<'t>, sig: Sig, limit: u32) -> Option<Vec<(V<'t>, V<'t>)>> {
+        let (mut a, mut b) = (sx, sy);
+        let mut elims = Vec::new();
+        loop {
+            match (a, b) {
+                (Spine::Empty, Spine::Empty) => break,
+                (Spine::Snoc { prev: pa, elim: ea, .. }, Spine::Snoc { prev: pb, elim: eb, .. }) => {
+                    elims.push((pa.len(), *ea, *eb));
+                    a = pa;
+                    b = pb;
+                }
+                _ => return None,
+            }
+        }
+        let mut out = Vec::new();
+        for (idx, ea, eb) in elims.into_iter().rev() {
+            match (ea.view(), eb.view()) {
+                (ElimView::App(va), ElimView::App(vb)) =>
+                    if !(idx < limit && sig.arg_is_proof(idx)) {
+                        out.push((va, vb));
+                    },
+                (ElimView::Proj { ty_name: tx, idx: ix }, ElimView::Proj { ty_name: ty, idx: iy }) =>
+                    if tx != ty || ix != iy {
+                        return None;
+                    },
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
     fn spine_probe(&mut self, depth: u32, sx: S<'t>, sy: S<'t>, sig: Sig, limit: u32) -> bool {
-        self.tc_cache.probe_depth += 1;
-        let ok = self.unify_spine::<true>(depth, sx, sy, sig, limit);
-        self.tc_cache.probe_depth -= 1;
-        ok
+        if std::ptr::eq(sx, sy) {
+            return true;
+        }
+        if self.tc_cache.probe_depth > 0 {
+            return self.unify_spine::<true>(depth, sx, sy, sig, limit);
+        }
+        let Some(pairs) = self.probe_pairs(sx, sy, sig, limit) else { return false };
+        let outer = std::mem::replace(&mut self.tc_cache.probe_exhausted, false);
+        let decided = self.probe_pass(depth, &pairs);
+        self.tc_cache.probe_exhausted = outer;
+        decided
+    }
+
+    fn probe_pass(&mut self, depth: u32, pairs: &[(V<'t>, V<'t>)]) -> bool {
+        let mut decided = true;
+        for (va, vb) in pairs.iter().copied() {
+            self.tc_cache.probe_budget = Self::PROBE_CAP;
+            self.tc_cache.probe_exhausted = false;
+            self.tc_cache.probe_depth = 1;
+            let ok = self.unify::<true>(depth, va, vb);
+            self.tc_cache.probe_depth = 0;
+            if self.tc_cache.probe_exhausted {
+                self.tc_cache.conv_cache_neg_probe.clear();
+                decided = false;
+                continue;
+            }
+            if !ok {
+                return false;
+            }
+        }
+        decided
     }
 
     fn unfold_pair(&mut self, depth: u32, t: V<'t>, t2: V<'t>) -> bool {
