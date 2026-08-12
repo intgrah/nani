@@ -357,17 +357,32 @@ pub(crate) fn parse_export_mapped<'p>(
     parser.finish()
 }
 
+const READ_CHUNK: usize = 1 << 22;
+
 pub(crate) fn parse_export_file<'p, R: BufRead>(
     arena: &'p ArenaRef<'p>,
     buf_reader: R,
     config: Config,
 ) -> Result<(crate::util::ExportFile<'p>, Vec<String>), Box<dyn Error>> {
     let mut parser = Parser::new(arena, buf_reader, config);
-    let mut input = Vec::new();
-    parser.buf_reader.read_to_end(&mut input)?;
-    parser.reserve_for(input.len());
-    parser.run_over(&input)?;
-    drop(input);
+    let mut buf: Vec<u8> = Vec::with_capacity(2 * READ_CHUNK);
+    loop {
+        let filled = buf.len();
+        buf.resize(filled + READ_CHUNK, 0);
+        let read = parser.buf_reader.read(&mut buf[filled..])?;
+        buf.truncate(filled + read);
+        if read == 0 {
+            break
+        }
+        if let Some(last) = buf.iter().rposition(|b| *b == b'\n') {
+            parser.run_over(&buf[..=last])?;
+            buf.drain(..=last);
+        }
+    }
+    if !buf.is_empty() {
+        parser.run_over(&buf)?;
+    }
+    drop(buf);
     parser.finish()
 }
 
@@ -717,12 +732,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
         }
     }
     
-    fn reserve_for(&mut self, input_len: usize) {
-        self.names_by_idx.reserve(input_len / 128);
-        self.levels_by_idx.reserve(input_len / 1024);
-        self.exprs_by_idx.reserve(input_len / 24);
-    }
-
     fn push_name(&mut self, expected: BackRef, n: Name<'a>) {
         if self.dag.names.get(&n).is_some() {
             panic!("Attempted to insert duplicate Name");
