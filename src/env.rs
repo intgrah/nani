@@ -300,6 +300,7 @@ impl<'x, 'a: 'x> Env<'x, 'a> {
         }
     }
 
+    #[inline]
     pub fn get_constructor(&self, n: &NamePtr<'a>) -> Option<&ConstructorData<'a>> {
         match self.get_declar(n) {
             Some(Declar::Constructor(c)) => Some(c),

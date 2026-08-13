@@ -479,6 +479,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
     }
 
+    #[inline]
     fn head_spine_sig(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>, sx: S<'t>, sy: S<'t>) -> (Sig, u32) {
         let sig = self.sig_of(name, levels);
         if !sig.masks_any_arg() {
