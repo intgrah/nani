@@ -34,6 +34,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 stumpalo = "0.5.1"
 bumpalo = { version = "3.16", features = ["collections"] }
 hashbrown = "0.17.1"
+smallvec = { version = "1", features = ["union"] }
 mimalloc = "0.1.52"
 memmap2 = "0.9.11"
 

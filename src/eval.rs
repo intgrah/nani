@@ -9,6 +9,8 @@ use crate::value::{self, Closure, Elim, ElimView, RigidHead, Spine, Value, E, S,
 use num_bigint::BigUint;
 use num_traits::pow::Pow;
 use std::cell::OnceCell;
+
+pub(crate) type SpineArgs<'t> = smallvec::SmallVec<[V<'t>; 8]>;
 use std::collections::hash_map::Entry;
 
 #[inline]
@@ -1496,7 +1498,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             };
             let spine = *spine;
             let mut cur = head_value;
-            let mut run: Vec<V<'t>> = Vec::new();
+            let mut run: SpineArgs<'t> = SpineArgs::new();
             for e in spine.to_vec() {
                 match e.view() {
                     ElimView::App(a) => run.push(a),
@@ -1561,8 +1563,8 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         Some(v)
     }
 
-    pub(crate) fn spine_apps(&mut self, depth: u32, spine: S<'t>) -> Option<Vec<V<'t>>> {
-        let mut out = Vec::with_capacity(spine.len() as usize);
+    pub(crate) fn spine_apps(&mut self, depth: u32, spine: S<'t>) -> Option<SpineArgs<'t>> {
+        let mut out = SpineArgs::with_capacity(spine.len() as usize);
         let mut cur: &Spine<'t> = spine;
         while let Spine::Snoc { prev, elim, .. } = cur {
             match elim.view() {
@@ -1749,7 +1751,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         Some(new_ctor)
     }
 
-    fn unwrap_inductive_app(&mut self, depth: u32, v: V<'t>) -> Option<(NamePtr<'t>, LevelsPtr<'t>, Vec<V<'t>>)> {
+    fn unwrap_inductive_app(&mut self, depth: u32, v: V<'t>) -> Option<(NamePtr<'t>, LevelsPtr<'t>, SpineArgs<'t>)> {
         match v {
             Value::Rigid { head: RigidHead::Inductive(n, ls), spine, .. } => {
                 let args = self.spine_apps(depth, spine)?;
@@ -1794,7 +1796,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn unwrap_ctor_app(&mut self, depth: u32, v: V<'t>) -> Option<(NamePtr<'t>, Vec<V<'t>>)> {
+    fn unwrap_ctor_app(&mut self, depth: u32, v: V<'t>) -> Option<(NamePtr<'t>, SpineArgs<'t>)> {
         match v {
             Value::Rigid { head: RigidHead::Ctor(name, _), spine, .. } => {
                 let args = self.spine_apps(depth, spine)?;

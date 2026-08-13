@@ -648,7 +648,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         if inductive_name != ind_name {
             return false;
         }
-        let yargs: Vec<V<'t>> = match self.spine_apps(depth, yspine) {
+        let yargs = match self.spine_apps(depth, yspine) {
             Some(v) if v.len() == usize::from(num_params) + usize::from(num_fields) => v,
             _ => return false,
         };
