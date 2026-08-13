@@ -9,6 +9,7 @@ use crate::value::{self, Closure, Elim, ElimView, RigidHead, Spine, Value, E, S,
 use num_bigint::BigUint;
 use num_traits::pow::Pow;
 use std::cell::OnceCell;
+use std::collections::hash_map::Entry;
 
 #[inline]
 fn rigid_head_key<'a>(head: &RigidHead<'a>) -> (u8, u64, u64) {
@@ -257,46 +258,49 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     pub(crate) fn mk_thunk_hc(&mut self, env: E<'t>, e: ExprPtr<'t>) -> V<'t> {
         let te = self.key_env(env, e);
         let key = (te as *const value::Env<'t> as usize, e);
-        if let Some(v) = self.tc_cache.thunk_hc.get(&key) {
-            return v;
+        let arena = self.arena;
+        match self.tc_cache.thunk_hc.entry(key) {
+            Entry::Occupied(o) => *o.get(),
+            Entry::Vacant(slot) => *slot.insert(value::mk_thunk(arena, te, e)),
         }
-        let v = value::mk_thunk(self.arena, te, e);
-        self.tc_cache.thunk_hc.insert(key, v);
-        v
     }
 
     #[inline]
     fn spine_snoc_hc(&mut self, prev: S<'t>, elim: Elim<'t>) -> S<'t> {
         let key = (prev as *const Spine<'t> as usize, elim_key(&elim));
-        if let Some(s) = self.tc_cache.spine_hc.get(&key) {
-            return s;
+        let arena = self.arena;
+        match self.tc_cache.spine_hc.entry(key) {
+            Entry::Occupied(o) => *o.get(),
+            Entry::Vacant(slot) => {
+                let s = value::spine_snoc(arena, prev, elim);
+                let canon = prev.is_canonical()
+                    && match elim.view() {
+                        ElimView::App(a) => a.is_canonical(),
+                        ElimView::Proj { .. } => true,
+                    };
+                if canon {
+                    s.mark_canonical();
+                }
+                *slot.insert(s)
+            }
         }
-        let s = value::spine_snoc(self.arena, prev, elim);
-        let canon = prev.is_canonical()
-            && match elim.view() {
-                ElimView::App(a) => a.is_canonical(),
-                ElimView::Proj { .. } => true,
-            };
-        if canon {
-            s.mark_canonical();
-        }
-        self.tc_cache.spine_hc.insert(key, s);
-        s
     }
 
     #[inline]
     fn mk_rigid_hc(&mut self, head: RigidHead<'t>, spine: S<'t>) -> V<'t> {
         let hk = rigid_head_key(&head);
         let key = (hk.0, hk.1, hk.2, spine as *const Spine<'t> as usize);
-        if let Some(v) = self.tc_cache.rigid_hc.get(&key) {
-            return v;
+        let arena = self.arena;
+        match self.tc_cache.rigid_hc.entry(key) {
+            Entry::Occupied(o) => *o.get(),
+            Entry::Vacant(slot) => {
+                let v = value::mk_rigid(arena, head, spine);
+                if spine.is_canonical() {
+                    v.mark_canonical();
+                }
+                *slot.insert(v)
+            }
         }
-        let v = value::mk_rigid(self.arena, head, spine);
-        if spine.is_canonical() {
-            v.mark_canonical();
-        }
-        self.tc_cache.rigid_hc.insert(key, v);
-        v
     }
 
     #[inline]
@@ -309,13 +313,15 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     ) -> V<'t> {
         debug_assert!(body.ctx.is_none());
         let key = (binder_type, body.env as *const value::Env<'t> as usize, body.body);
-        if let Some(v) = self.tc_cache.lam_hc.get(&key) {
-            return v;
+        let arena = self.arena;
+        match self.tc_cache.lam_hc.entry(key) {
+            Entry::Occupied(o) => *o.get(),
+            Entry::Vacant(slot) => {
+                let v = value::mk_lam(arena, binder_name, binder_style, binder_type, body);
+                v.mark_canonical();
+                *slot.insert(v)
+            }
         }
-        let v = value::mk_lam(self.arena, binder_name, binder_style, binder_type, body);
-        v.mark_canonical();
-        self.tc_cache.lam_hc.insert(key, v);
-        v
     }
 
     #[inline]
@@ -397,13 +403,15 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             body.body,
             body.ctx.map_or(0, |c| c as *const value::Ctx<'t> as usize),
         );
-        if let Some(v) = self.tc_cache.pi_hc.get(&key) {
-            return v;
+        let arena = self.arena;
+        match self.tc_cache.pi_hc.entry(key) {
+            Entry::Occupied(o) => *o.get(),
+            Entry::Vacant(slot) => {
+                let v = value::mk_pi(arena, binder_name, binder_style, domain, body);
+                v.mark_canonical();
+                *slot.insert(v)
+            }
         }
-        let v = value::mk_pi(self.arena, binder_name, binder_style, domain, body);
-        v.mark_canonical();
-        self.tc_cache.pi_hc.insert(key, v);
-        v
     }
 }
 
