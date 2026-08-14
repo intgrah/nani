@@ -617,6 +617,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 }
 
 #[inline]
+pub(crate) fn ignores_binder(body: ExprPtr<'_>) -> bool {
+    let k = body.num_loose_bvars();
+    k == 0 || (k <= 64 && body.as_ref().fv_mask() & 1 == 0)
+}
+
+#[inline]
 pub(crate) fn child_mask(e: ExprPtr<'_>) -> u64 {
     let k = e.num_loose_bvars();
     if k == 0 || k > 64 {

@@ -48,11 +48,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn arg_value(&mut self, depth: u32, env: E<'t>, a: ExprPtr<'t>) -> V<'t> {
-        match self.ctx.read_expr_ref(a) {
-            Var { .. } | Sort { .. } | Const { .. } | NatLit { .. } | StringLit { .. } =>
-                self.eval(depth, env, a),
-            _ => self.mk_thunk_hc(env, a),
-        }
+        self.eval(depth, env, a)
     }
 
     fn lit_inductive_type(&mut self, n: Option<NamePtr<'t>>) -> V<'t> {
@@ -178,6 +174,8 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             }
             if body.ctx.is_none() && self.ctx.num_loose_bvars(body.body) == 0 {
                 fty = self.eval(depth, body.env, body.body);
+            } else if crate::expr::ignores_binder(body.body) {
+                fty = self.apply_closure(depth, body, domain, Some(domain));
             } else {
                 let av = self.arg_value(depth, env, arg);
                 fty = self.apply_closure(depth, body, av, Some(domain));

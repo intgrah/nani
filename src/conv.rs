@@ -373,7 +373,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         for (idx, ea, eb) in elims.into_iter().rev() {
             match (ea.view(), eb.view()) {
                 (ElimView::App(va), ElimView::App(vb)) =>
-                    if !(idx < limit && sig.arg_is_proof(idx)) {
+                    if !(idx < limit && sig.arg_is_ignorable(idx)) {
                         out.push((va, vb));
                     },
                 (ElimView::Proj { ty_name: tx, idx: ix }, ElimView::Proj { ty_name: ty, idx: iy }) =>
@@ -501,7 +501,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 match (ea.view(), eb.view()) {
                     (ElimView::App(va), ElimView::App(vb)) => {
                         let idx = pa.len();
-                        if idx < limit && sig.arg_is_proof(idx) {
+                        if idx < limit && sig.arg_is_ignorable(idx) {
                             return true;
                         }
                         self.unify::<RIGID>(depth, va, vb)

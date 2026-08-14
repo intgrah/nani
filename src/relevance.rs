@@ -9,20 +9,24 @@ pub(crate) struct Sig {
     pub(crate) arity: u8,
     pub(crate) prop_arg: u64,
     pub(crate) arg_known: u64,
+    pub(crate) absent_arg: u64,
     pub(crate) prop_result: u64,
     pub(crate) result_known: u64,
 }
 
 impl Sig {
     pub(crate) const ALL_RELEVANT: Sig =
-        Sig { arity: 0, prop_arg: 0, arg_known: 0, prop_result: 0, result_known: 0 };
+        Sig { arity: 0, prop_arg: 0, arg_known: 0, absent_arg: 0, prop_result: 0, result_known: 0 };
 
     #[inline]
-    pub(crate) fn masks_any_arg(&self) -> bool { self.prop_arg & self.arg_known != 0 }
+    fn ignorable(&self) -> u64 { (self.prop_arg & self.arg_known) | self.absent_arg }
 
     #[inline]
-    pub(crate) fn arg_is_proof(&self, idx: u32) -> bool {
-        idx < MAX_TRACKED && ((self.prop_arg & self.arg_known) >> idx) & 1 == 1
+    pub(crate) fn masks_any_arg(&self) -> bool { self.ignorable() != 0 }
+
+    #[inline]
+    pub(crate) fn arg_is_ignorable(&self, idx: u32) -> bool {
+        idx < MAX_TRACKED && (self.ignorable() >> idx) & 1 == 1
     }
 
     #[inline]
@@ -119,8 +123,39 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             arity: u8::try_from(n).expect("telescope arity exceeds the tracked bound"),
             prop_arg,
             arg_known,
+            absent_arg: self.absent_args(name),
             prop_result,
             result_known,
         }
+    }
+
+    fn absent_args(&mut self, name: NamePtr<'t>) -> u64 {
+        let Some((_, val)) = self.env.get_declar_val(&name) else { return 0 };
+        let Some(decl) = self.env.get_declar(&name) else { return 0 };
+        let ty = decl.info().ty;
+        let mut body = val;
+        let mut arity = 0u32;
+        while let crate::expr::Expr::Lambda { body: inner, .. } = self.ctx.read_expr(body) {
+            if arity == MAX_TRACKED {
+                break;
+            }
+            body = inner;
+            arity += 1;
+        }
+        if arity == 0 || u32::from(body.num_loose_bvars()) > MAX_TRACKED {
+            return 0;
+        }
+        let used = body.as_ref().fv_mask();
+        let mut absent = 0u64;
+        let mut rest_ty = ty;
+        for i in 0..arity {
+            let crate::expr::Expr::Pi { body: rest, .. } = self.ctx.read_expr(rest_ty) else { break };
+            let unused_in_value = (used >> (arity - 1 - i)) & 1 == 0;
+            if unused_in_value && crate::expr::ignores_binder(rest) {
+                absent |= 1u64 << i;
+            }
+            rest_ty = rest;
+        }
+        absent
     }
 }

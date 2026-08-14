@@ -257,16 +257,6 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
         self.prune_env(env, e.as_ref().fv_mask())
     }
 
-    pub(crate) fn mk_thunk_hc(&mut self, env: E<'t>, e: ExprPtr<'t>) -> V<'t> {
-        let te = self.key_env(env, e);
-        let key = (te as *const value::Env<'t> as usize, e);
-        let arena = self.arena;
-        match self.tc_cache.thunk_hc.entry(key) {
-            Entry::Occupied(o) => *o.get(),
-            Entry::Vacant(slot) => *slot.insert(value::mk_thunk(arena, te, e)),
-        }
-    }
-
     #[inline]
     fn spine_snoc_hc(&mut self, prev: S<'t>, elim: Elim<'t>) -> S<'t> {
         let key = (prev as *const Spine<'t> as usize, elim_key(&elim));
@@ -572,22 +562,13 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 return result;
             }
             let f = self.eval(depth, env, fun);
-            let trivial = matches!(
-                self.ctx.read_expr_ref(arg),
-                Expr::Var { .. }
-                    | Expr::Sort { .. }
-                    | Expr::Const { .. }
-                    | Expr::NatLit { .. }
-                    | Expr::StringLit { .. }
-            );
+            let a = self.eval(depth, env, arg);
             if let Value::Lam { body: clo, .. } = f {
-                let a = if trivial { self.eval(depth, env, arg) } else { self.mk_thunk_hc(env, arg) };
                 let clo_env = clo.env;
                 let clo_body = clo.body;
                 let new_env = value::env_extend(self.arena, clo_env, a);
                 return self.eval(depth, new_env, clo_body);
             }
-            let a = if trivial { self.eval(depth, env, arg) } else { self.mk_thunk_hc(env, arg) };
             return self.apply(depth, f, a);
         }
         match first {
@@ -616,14 +597,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 value::mk_lam(self.arena, binder_name, binder_style, binder_type, Closure::mk_eval(ce, body))
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let dom = match self.ctx.read_expr_ref(binder_type) {
-                    Expr::Var { .. }
-                    | Expr::Sort { .. }
-                    | Expr::Const { .. }
-                    | Expr::NatLit { .. }
-                    | Expr::StringLit { .. } => self.eval(depth, env, binder_type),
-                    _ => self.mk_thunk_hc(env, binder_type),
-                };
+                let dom = self.eval(depth, env, binder_type);
                 {
                     let ce = self.key_env(env, e);
                     value::mk_pi(self.arena, binder_name, binder_style, dom, Closure::mk_eval(ce, body))
