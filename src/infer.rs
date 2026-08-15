@@ -20,6 +20,24 @@ pub(crate) struct CachedType<'a> {
     pub(crate) checked_under: CheckScope<'a>,
 }
 
+fn atomic_type(v: V<'_>) -> bool {
+    match v {
+        Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => true,
+        Value::Rigid { spine, .. } => spine.is_empty(),
+        _ => false,
+    }
+}
+
+fn has_deep_bvar_prefix(mut env: E<'_>) -> bool {
+    for _ in 0..64 {
+        match env {
+            value::Env::Cons { v: Value::Rigid { head: RigidHead::BVar(..), .. }, parent, .. } => env = parent,
+            _ => return false,
+        }
+    }
+    true
+}
+
 impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     fn uparam_scope(&self) -> CheckScope<'t> {
         match self.declar_info {
@@ -110,14 +128,24 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             App { .. } => self.infer_app_v(flag, depth, env, ctx, e),
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
                 let dom = self.arg_value(depth, env, binder_type);
+                let mut body_ty = None;
                 if flag == Check {
                     self.infer_sort_of_v(flag, depth, env, ctx, binder_type);
                     let fresh = self.mk_bvar_hc(depth, dom);
                     let env2 = value::env_extend(self.arena, env, fresh);
                     let ctx2 = value::ctx_extend(self.arena, ctx, dom);
-                    self.infer_value(flag, depth + 1, env2, ctx2, body);
+                    body_ty = Some(self.infer_value(flag, depth + 1, env2, ctx2, body));
                 }
-                let clo = Closure::mk_infer(self.key_env(env, e), ctx, body);
+                let clo = match body_ty.filter(|bt| {
+                    atomic_type(bt)
+                        && bt.is_closed()
+                        && std::ptr::eq(*bt, dom)
+                        && self.ctx.num_loose_bvars(binder_type) == 0
+                        && has_deep_bvar_prefix(env)
+                }) {
+                    Some(_) => Closure::mk_eval(self.empty_env(), binder_type),
+                    None => Closure::mk_infer(self.key_env(env, e), ctx, body),
+                };
                 value::mk_pi(self.arena, binder_name, binder_style, dom, clo)
             }
             Pi { binder_type, body, .. } => {
