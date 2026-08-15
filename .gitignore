@@ -3,3 +3,4 @@
 design.md
 /test_resources/arena/
 /test_resources/init/
+*.profdata
