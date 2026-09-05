@@ -99,7 +99,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             let xa = x as *const Value<'t> as usize;
             let ya = y as *const Value<'t> as usize;
             let cache_key = if xa < ya { (xa, ya) } else { (ya, xa) };
-            if self.tc_cache.conv_uf.equiv(xa, ya) {
+            if self.tc_cache.conv_cache_pos.contains(&cache_key) {
                 return true;
             }
             if RIGID && neg_eligible {
@@ -116,7 +116,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             let truncated = self.tc_cache.probe_exhausted;
             self.tc_cache.probe_exhausted = outer | truncated;
             if result {
-                self.tc_cache.conv_uf.union(xa, ya);
+                self.tc_cache.conv_cache_pos.insert(cache_key);
             } else if RIGID && neg_eligible {
                 if truncated {
                     self.tc_cache.conv_cache_neg_probe.insert(cache_key);
@@ -216,10 +216,17 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             }
 
             (Value::Lam { body: bx, .. }, Value::Lam { body: by, .. }) => {
-                if bx.body == by.body && Self::envs_ptr_equal(bx.env, by.env) {
+                let dx = self.lam_domain(depth, t);
+                let dy = self.lam_domain(depth, t2);
+                if bx.body == by.body
+                    && std::ptr::eq(dx, dy)
+                    && Self::envs_ptr_equal(bx.env, by.env)
+                {
                     return true;
                 }
-                let dx = self.lam_domain(depth, t);
+                if !self.unify::<RIGID>(depth, dx, dy) {
+                    return false;
+                }
                 let fresh = self.mk_bvar_hc(depth, dx);
                 let vx = self.apply_closure(depth + 1, bx, fresh, None);
                 let vy = self.apply_closure(depth + 1, by, fresh, None);
@@ -616,14 +623,18 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn is_prop_type(&mut self, depth: u32, t: V<'t>) -> bool {
-        if let Some(l) = self.level_of_type(depth, t) {
-            self.ctx.is_zero(l)
-        } else {
-            false
-        }
+        let level = self.level_of_type(depth, t).expect("expected a sort");
+        self.ctx.is_zero(level)
     }
 
     fn try_proof_irrel_lam(&mut self, depth: u32, x: V<'t>, y: V<'t>) -> bool {
+        if matches!((x, y), (Value::Lam { .. }, Value::Lam { .. })) {
+            let dx = self.lam_domain(depth, x);
+            let dy = self.lam_domain(depth, y);
+            if !self.unify::<true>(depth, dx, dy) {
+                return false;
+            }
+        }
         let lam_side = match (x, y) {
             (Value::Lam { .. }, _) => x,
             (_, Value::Lam { .. }) => y,

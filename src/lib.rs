@@ -22,11 +22,9 @@ pub mod relevance;
 pub mod tc;
 #[cfg(test)]
 mod tests;
-pub mod union_find;
 pub mod util;
 pub mod value;
 
 pub(crate) const STACK_SIZE: usize = 2 * 1024 * 1024 * 1024;
-
 
 

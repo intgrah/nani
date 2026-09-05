@@ -9,16 +9,24 @@ const MAX_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
 
 fn arena_root() -> Option<PathBuf> { std::env::var_os("LEAN_KERNEL_ARENA").map(PathBuf::from) }
 
-fn expected_outcome(root: &Path, stem: &str) -> Option<bool> {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ExpectedOutcome {
+    Accept,
+    Reject,
+    Either,
+}
+
+fn expected_outcome(root: &Path, stem: &str) -> Option<ExpectedOutcome> {
     let spec = fs::read_to_string(root.join("tests").join(format!("{stem}.yaml"))).ok()?;
     spec.lines().find_map(|l| l.strip_prefix("outcome:")).map(|v| match v.trim() {
-        "accept" => true,
-        "reject" => false,
+        "accept" => ExpectedOutcome::Accept,
+        "reject" => ExpectedOutcome::Reject,
+        "either" => ExpectedOutcome::Either,
         other => panic!("bad outcome {other:?} for {stem}"),
     })
 }
 
-fn collect_cases(root: &Path, out: &mut Vec<(PathBuf, bool)>) {
+fn collect_cases(root: &Path, out: &mut Vec<(PathBuf, ExpectedOutcome)>) {
     let Ok(entries) = fs::read_dir(root.join("_build/tests")) else {
         return;
     };
@@ -31,8 +39,8 @@ fn collect_cases(root: &Path, out: &mut Vec<(PathBuf, bool)>) {
             continue;
         }
         let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
-        if let Some(expect_accept) = expected_outcome(root, &stem) {
-            out.push((path, expect_accept));
+        if let Some(expected) = expected_outcome(root, &stem) {
+            out.push((path, expected));
         }
     }
 }
@@ -115,7 +123,7 @@ fn arena_fast_tier() {
     }
 
     let mut failures = Vec::new();
-    for (export, expect_accept) in &cases {
+    for (export, expected) in &cases {
         let outcome = run_case(export.clone());
         let (got_accept, detail) = match &outcome {
             Outcome::Accepted => (true, "(accepted)".to_string()),
@@ -123,10 +131,19 @@ fn arena_fast_tier() {
             Outcome::KernelRejected(e) => (false, format!("kernel: {e}")),
             Outcome::UnexpectedPanic(e) => (false, format!("panic: {e}")),
         };
-        let unexpected_panic = *expect_accept && matches!(outcome, Outcome::UnexpectedPanic(_));
-        if got_accept != *expect_accept || unexpected_panic {
+        let mismatch = match expected {
+            ExpectedOutcome::Accept => !got_accept || matches!(outcome, Outcome::UnexpectedPanic(_)),
+            ExpectedOutcome::Reject => got_accept,
+            ExpectedOutcome::Either => false,
+        };
+        if mismatch {
             let name = export.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            failures.push(format!("{name}: expected accept={expect_accept}, got accept={got_accept} ({detail})"));
+            let expected = match expected {
+                ExpectedOutcome::Accept => "accept",
+                ExpectedOutcome::Reject => "reject",
+                ExpectedOutcome::Either => "either",
+            };
+            failures.push(format!("{name}: expected {expected}, got accept={got_accept} ({detail})"));
         }
     }
 

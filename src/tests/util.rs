@@ -149,6 +149,65 @@ fn check_proj_from_prop() {
     )
 }
 
+#[test]
+#[should_panic(expected = "imported recursor rule does not match the reconstructed rule")]
+fn reject_rec_rule_with_forged_lambda_domains() {
+    test_export_file_should_panic(
+        Some(Path::new("test_resources/RuleDomainMismatch/config.json")),
+        |export| {
+            for declar in export.declars.values() {
+                export.check_declar(declar);
+            }
+        },
+    )
+}
+
+#[test]
+#[should_panic(expected = "imported inductive block contains an underived recursor")]
+fn reject_unlisted_recursor() {
+    test_export_file_should_panic(
+        Some(Path::new("test_resources/UnlistedRecursor/config.json")),
+        |export| {
+            for declar in export.declars.values() {
+                export.check_declar(declar);
+            }
+        },
+    )
+}
+
+#[test]
+#[should_panic(expected = "expected a sort")]
+fn reject_is_prop_when_inferred_type_is_not_a_sort() {
+    test_export_file_should_panic(None, |export| {
+        export.with_tc(crate::env::EnvLimit::Empty, |tc| {
+            let sort = crate::value::mk_sort(tc.arena, tc.ctx.zero());
+            let stuck_type = tc.mk_bvar_hc(0, sort);
+            let malformed_type = tc.mk_bvar_hc(1, stuck_type);
+            tc.is_prop_type(0, malformed_type);
+        });
+    })
+}
+
+#[test]
+#[should_panic(expected = "inductive occurrence is not applied uniformly")]
+fn reject_nonuniform_inductive_occurrence_before_reduction() {
+    test_export_file_should_panic(None, |export| {
+        export.with_ctx(|ctx, _cache, _arena| {
+            let ind_name = ctx.str1("E");
+            let param_name = ctx.str1("p");
+            let levels = ctx.alloc_levels_slice(&[]);
+            let ind = ctx.mk_const(ind_name, levels);
+            let prop = ctx.prop();
+            let bad_occurrence = ctx.mk_app(ind, prop);
+            let one = ctx.succ(ctx.zero());
+            let param_type = ctx.mk_sort(one);
+            let ctor_type = ctx.mk_pi(param_name, crate::expr::BinderStyle::Default, param_type, bad_occurrence);
+
+            ctx.check_uniform_inductive_occurrences(ctor_type, &[ind_name], levels, 1);
+        });
+    });
+}
+
 pub(crate) fn rand_string<'t>(rng: &mut ThreadRng, size: usize) -> CowStr<'t> {
     let rand_string: String = rng.sample_iter(&Alphanumeric).take(size).map(char::from).collect();
     CowStr::Owned(rand_string)

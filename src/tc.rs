@@ -6,7 +6,7 @@ use crate::value::E;
 
 use InferFlag::*;
 
-const SESSION_BUDGET: usize = 1 << 20;
+const SESSION_BUDGET: usize = 2_621_440;
 
 const CHUNK_SIZE: usize = 64;
 
@@ -103,10 +103,28 @@ impl<'p> ExportFile<'p> {
         }
         match d {
             Constructor(ctor_data) => assert!(self.declars.get(&ctor_data.inductive_name).is_some()),
-            Recursor(recursor_data) =>
+            Recursor(recursor_data) => {
+                let rec_idx = self.declars.get_index_of(&recursor_data.info.name).expect("missing recursor");
+                let first = *recursor_data
+                    .all_inductives
+                    .first()
+                    .expect("recursor is not associated with an inductive block");
+                let block = *self
+                    .mutual_block_sizes
+                    .get(&first)
+                    .expect("recursor is associated with a non-inductive declaration");
+                assert!(
+                    rec_idx >= block.0 && rec_idx < block.0 + block.1,
+                    "recursor is not in its associated inductive block"
+                );
                 for ind_name in recursor_data.all_inductives.iter() {
-                    assert!(self.declars.get(ind_name).is_some())
-                },
+                    assert!(
+                        matches!(self.declars.get(ind_name), Some(Inductive(..)))
+                            && self.mutual_block_sizes.get(ind_name) == Some(&block),
+                        "recursor is associated with a declaration outside its inductive block"
+                    );
+                }
+            }
             _ => {}
         }
     }

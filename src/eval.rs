@@ -791,8 +791,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             i += 1;
             while i < args.len() {
                 let Expr::Lambda { body: inner, .. } = self.ctx.read_expr(body) else { break };
-                let pruned = self.key_env(env, body);
-                env = value::env_extend(self.arena, pruned, args[i]);
+                env = value::env_extend(self.arena, env, args[i]);
                 body = inner;
                 i += 1;
             }

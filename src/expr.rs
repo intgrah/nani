@@ -517,6 +517,41 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.find_const_aux(e, pred, &mut cache)
     }
 
+    pub(crate) fn has_nested_name(&self, e: ExprPtr<'t>, nested: NamePtr<'t>) -> bool {
+        let mut cache = crate::util::new_fx_hash_map();
+        self.has_nested_name_aux(e, nested, &mut cache)
+    }
+
+    fn has_nested_name_aux(
+        &self,
+        e: ExprPtr<'t>,
+        nested: NamePtr<'t>,
+        cache: &mut FxHashMap<ExprPtr<'t>, bool>,
+    ) -> bool {
+        if let Some(cached) = cache.get(&e) {
+            return *cached;
+        }
+        let result = match self.read_expr(e) {
+            Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } => false,
+            Const { name, .. } => self.get_pfx(name) == nested,
+            App { fun, arg, .. } =>
+                self.has_nested_name_aux(fun, nested, cache)
+                    || self.has_nested_name_aux(arg, nested, cache),
+            Pi { binder_type, body, .. } | Lambda { binder_type, body, .. } =>
+                self.has_nested_name_aux(binder_type, nested, cache)
+                    || self.has_nested_name_aux(body, nested, cache),
+            Let { data: &crate::expr::LetData { binder_type, val, body, .. }, .. } =>
+                self.has_nested_name_aux(binder_type, nested, cache)
+                    || self.has_nested_name_aux(val, nested, cache)
+                    || self.has_nested_name_aux(body, nested, cache),
+            Proj { ty_name, structure, .. } =>
+                self.get_pfx(ty_name) == nested
+                    || self.has_nested_name_aux(structure, nested, cache),
+        };
+        cache.insert(e, result);
+        result
+    }
+
     fn find_const_aux<F>(&self, e: ExprPtr<'t>, pred: F, cache: &mut FxHashMap<ExprPtr<'t>, bool>) -> bool
     where
         F: FnOnce(NamePtr<'t>) -> bool + Copy, {
